@@ -88,7 +88,7 @@ class ApplicationWindow(QtWidgets.QDialog):
             vy = MyVelocityCanvas(self, anem_processor_owner, 1, self.main_widget, width=5, height=4, dpi=100)
             vz = MyVelocityCanvas(self, anem_processor_owner, 2, self.main_widget, width=5, height=4, dpi=100)
             m = MyVelocityCanvas(self, anem_processor_owner, 3, self.main_widget, width=5, height=4, dpi=100,
-                                 title="Speed", ylabel="speed (m/s)")
+                                 title="Wind speed", ylabel="speed (m/s)")
             theta = MyVelocityCanvas(self, anem_processor_owner, 4, self.main_widget, width=5, height=4, dpi=100,
                                      title="Radial angle", ylabel="radial angle (degrees)", yrange=(-220, 220),
                                      yticks=[-180, -90, 0, 90, 180])
@@ -359,7 +359,7 @@ class MyVelocityCanvas(FigureCanvas):
             if len(self.xdata) >= MEDIAN_WINDOW_SIZE:
                 x_med = np.median(self.xdata[-MEDIAN_WINDOW_SIZE:])
                 y_med = np.median(self.ydata[-MEDIAN_WINDOW_SIZE:])
-                print("median ", y_med)
+                # print("median ", y_med)
                 self.xdata_med.append(x_med)
                 self.ydata_med.append(y_med)
 
