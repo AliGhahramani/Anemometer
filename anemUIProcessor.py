@@ -17,22 +17,27 @@ class AnemometerProcessor:
         self.phase_only = phase_only
         self.is_calibrating = True
         self.aw = None
-
+        self.start_time = time.time()
         self.paths = []
-        self.inbuf_toggle = []  # list of (# paths) lists. Each list holds tuples that has yet to be graphed on a toggle-able graph
-        # tuple (relative_phase_a_to_b, relative_phase_b_to_a, absolute_phase_a_to_b, relative velocity)
-        self.inbuf_other = []  # Same behavior as inbuf_toggle, different contents (duct: temperatures, room: directional vel)
+        self.median_window_size = 5
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
             self.paths = [(3, 1), (0, 1), (0, 2), (3, 2)]
-            self.inbuf_toggle = [[], [], [], []]
-            self.inbuf_other = [[], [], [], []]  # temperatures on each path
         else:
             self.paths = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
-            self.inbuf_toggle = [[], [], [], [], [], []]
-            self.inbuf_other = [[], [], [], [], [], []]  # vx, vy, vz, m, theta, phi.
             self.past_5_velocity_magnitudes = deque(maxlen=5)
+        l = len(self.paths)
+
+        # Graph buffers, containing data to be added to the graphs
+        self.toggle_graph_buffer = [[] for i in range(0, l)]       # list of (# paths) lists. Each list holds a tuple in form (timestamp, (rel_a_b, rel_b_a, abs_a_b, rel_vel)) that has yet to be graphed on a toggle-able graph
+        self.general_graph_buffer = [[] for i in range(0, l)]      # Same behavior as toggle_graph_buffer, different contents (duct: (timestamp, temp) per path, room: timestamp, and one of vx, vy, vz, m, theta, phi)
+        self.toggle_graph_buffer_med = [[] for i in range(0, l)]   # medians
+        self.general_graph_buffer_med = [[] for i in range(0, l)]  # medians
+
+        # Data history
+        self.relative_data = [[] for i in range(0, l)]    # Same tuple data as toggle_graph_buffer, but for all data
+        self.general_data = [[] for i in range(0, l)]     # Same tuple data as general_graph_buffer, but for all data
 
         if phase_only:
             self._prev_rel_phase = {}  # {(src, dst) : number}
@@ -50,7 +55,14 @@ class AnemometerProcessor:
             self._calibrated_magnitude = {}
             self._calibrated_phase = {}
 
+        # Added by Yannan
+        self.past_5_counter = [0, 0, 0, 0, 0, 0]
 
+        self.past_vx = []
+        self.past_vy = []
+        self.past_vz = []
+        #duct is 4
+        # End added by Yannan
     def generate_window(self):
         self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
         return self.aw
@@ -78,6 +90,7 @@ class AnemometerProcessor:
         abs_phase = {}  # {src_to_dst : phase in degrees}
         magnitude = {}  # {src_to_dst : magnitude at index(maximum) - 2}
         magnitude_per_wave = {}  # {src_to_dst : magnitude increase per wave}
+        timestamp = reading.timestamp - self.start_time
         for path_string, path_reading in reading.path_readings.items():
             if self.is_calibrating:
                 # Find appropriate index (and track it for calibration)
@@ -161,8 +174,7 @@ class AnemometerProcessor:
                 for i in range(len(self.paths)):
                     a, b = self.paths[i]
                     abs_phase_ab = abs_phase[str(a) + "_to_" + str(b)]
-                    self.inbuf_toggle[i].append((0, 0, abs_phase_ab, 0))
-
+                    self.toggle_graph_buffer[i].append((timestamp, (0, 0, abs_phase_ab, 0)))
         # If not calibrating, calculate pairwise velocities.
         else:
             # For each path, calculate relative phase using absolute phase and magnitude
@@ -211,10 +223,12 @@ class AnemometerProcessor:
                     avg = (v_ab + v_ba) / 2
                     temp = avg * avg / 400 - 273.15
                     # print(temp)
-                    self.inbuf_other[i].append(temp)
+                    # TODO: These groups of appends should really be put in a helper function for readability.
+                    self.general_graph_buffer[i].append((timestamp, temp))
+                    self.general_data[i].append((timestamp, temp))
 
-                # TODO: Maybe want to pass a datetime over in the inbuf
-                self.inbuf_toggle[i].append((phase_ab, phase_ba, abs_phase_ab, v_rel))
+                self.toggle_graph_buffer[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
+                self.relative_data[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
                 all_v_rel.append(v_rel)
 
             # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
@@ -224,39 +238,6 @@ class AnemometerProcessor:
                 vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
                 vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
                 vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-                tnx = 5 # 6 if 15degree coordinate system
-                tny = 5 # 6 if 15degree coordinate system
-                if ( 0 > abs(all_v_rel[1]) / all_v_rel[2] > - 0.5 and 0 > abs(all_v_rel[1])/all_v_rel[5] > -0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-                if (0>abs(all_v_rel[2]) / all_v_rel[1] > -0.5 and 0 < abs(all_v_rel[2]) /all_v_rel[5] < 0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-                if (0<abs(all_v_rel[5])/ all_v_rel[1] < 0.5 and 0<abs(all_v_rel[5])/all_v_rel[2] < 0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.8, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-            #     
-                if ( 0 < abs(all_v_rel[0] / all_v_rel[3]) <  0.5 and 0 < abs(all_v_rel[0]/all_v_rel[4]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
-                if ( 0 < abs(all_v_rel[3] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[3]/all_v_rel[4]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30 *1.1, 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
-                if ( 0 < abs(all_v_rel[4] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[4]/all_v_rel[0]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
                 vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx				
                 vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / tny
                 vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
@@ -266,13 +247,32 @@ class AnemometerProcessor:
                     self.past_5_velocity_magnitudes)
                 theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 1 else 0
                 phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 1 else 0
-                self.inbuf_other[0].append(vx)
-                self.inbuf_other[1].append(vy)
-                self.inbuf_other[2].append(vz)
-                self.inbuf_other[3].append(m)
-                self.inbuf_other[4].append(theta)
-                self.inbuf_other[5].append(phi)
+                self.general_graph_buffer[0].append((timestamp, vx))
+                self.general_graph_buffer[1].append((timestamp, vy))
+                self.general_graph_buffer[2].append((timestamp, vz))
+                self.general_graph_buffer[3].append((timestamp, m))
+                self.general_graph_buffer[4].append((timestamp, theta))
+                self.general_graph_buffer[5].append((timestamp, phi))
+
+                self.general_data[0].append((timestamp, vx))
+                self.general_data[1].append((timestamp, vy))
+                self.general_data[2].append((timestamp, vz))
+                self.general_data[3].append((timestamp, m))
+                self.general_data[4].append((timestamp, theta))
+                self.general_data[5].append((timestamp, phi))
                 self.past_5_velocity_magnitudes.append(m)
+
+            # Calculate median over window and put in buffer
+            if len(self.general_data[0]) >= self.median_window_size:
+                for i in range(len(self.paths)):
+                    y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
+                    x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
+                    self.general_graph_buffer_med[i].append((x_med, y_med))
+
+                    y_med = np.median([x[1][3] for x in self.relative_data[i][-self.median_window_size:]]) # Median relative velocity
+                    x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
+                    self.toggle_graph_buffer_med[i].append((x_med, y_med))
+
 
     def _process_reading_phase(self, reading):
         # For each path, calculate absolute phase of reading 2 before max magnitude
@@ -283,6 +283,8 @@ class AnemometerProcessor:
         # figure out where to read from, and calculate absolute phase
         next_abs_phase = {}  # {(src, dst) : phase in degrees}
         read_index = {}  # {(src, dst) : index offset from this reading's max on which to do calculations }
+        # timestamp = reading.timestamp - self.start_time
+        timestamp = time.time() - self.start_time
         for src in range(0, num_sensors):
             for dst in range(0, num_sensors):
                 if src == dst:
@@ -364,9 +366,6 @@ class AnemometerProcessor:
                 cur_rel_phase[(src, dst)] = self._prev_rel_phase[(src, dst)]
                 self._cur_abs_phase[(src, dst)] = self._prev_abs_phase[(src, dst)]
 
-            print("got rel phase (1, 3)", cur_rel_phase[(1, 3)])
-            print("got rel phase (3, 1)", cur_rel_phase[(3, 1)])
-
 
         # If calibrating, track phase
         if self.is_calibrating:
@@ -409,7 +408,8 @@ class AnemometerProcessor:
                     phase_ab = cur_rel_phase[(src, dst)]
                     phase_ba = cur_rel_phase[(src, dst)]
                     abs_phase_ab = self._cur_abs_phase[(src, dst)]
-                    self.inbuf_toggle[i].append((phase_ab, phase_ba, abs_phase_ab, 0))
+                    self.toggle_graph_buffer[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, 0)))
+
         # If not calibrating, calculate pairwise velocities.
         else:
             all_v_rel = []
@@ -435,15 +435,16 @@ class AnemometerProcessor:
                     avg = (v_ab + v_ba) / 2
                     temp = avg * avg / 400 - 273.15
                     # print(temp)
-                    self.inbuf_other[i].append(temp)
+                    self.general_graph_buffer[i].append((timestamp, temp))
+                    self.general_data[i].append((timestamp, temp))
 
-                # TODO: Maybe want to pass a datetime over in the inbuf
-                self.inbuf_toggle[i].append((phase_ab, phase_ba, abs_phase_ab, v_rel))
+                self.toggle_graph_buffer[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
+                self.relative_data[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
                 all_v_rel.append(v_rel)
-                if (src, dst) == (1, 3):
-                    print("got rel vel (1, 3)", v_rel)
 
-
+            # Added by Yannan
+            self.velocity_outlier_filter(all_v_rel, cur_rel_phase)
+            # End added by Yannan
 
             # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
             if not self.is_duct:
@@ -452,28 +453,189 @@ class AnemometerProcessor:
                 vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
                 vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
                 vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-
-                vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
-                vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / 5
+                #vx_weight = [0, sin60, 0, 0, 0, -sin60]
+                #vy_weight = [0, sin30, 1, 0, 0, sin30]
+                #vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+                tnx = 5 # 6 if 15degree coordinate system
+                tny = 5 # 6 if 15degree coordinate system
+                tnz = [] 
+                if ( 0 > abs(all_v_rel[1]) / all_v_rel[2] > - 0.5 and 0 > abs(all_v_rel[1])/all_v_rel[5] > -0.5): 
+                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
+                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
+                    tnx = 2
+                    tny = 3
+                    tnz = [0,3]
+                if (0>abs(all_v_rel[2]) / all_v_rel[1] > -0.5 and 0 < abs(all_v_rel[2]) /all_v_rel[5] < 0.5): 
+                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
+                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
+                    tnx = 2
+                    tny = 3
+                    tnz = [0,4]
+                if (0<abs(all_v_rel[5])/ all_v_rel[1] < 0.5 and 0<abs(all_v_rel[5])/all_v_rel[2] < 0.5): 
+                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
+                    vy_weight = [0, sin30*0.85,1*0.8, 0, 0, sin30*0.85]
+                    tnx = 2
+                    tny = 3
+                    tnz = [3,4]
+            #     
+                if ( 0 < abs(all_v_rel[0] / all_v_rel[3]) <  0.5 and 0 < abs(all_v_rel[0]/all_v_rel[4]) < 0.5): 
+                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
+                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
+                    tnx = 3
+                    tny = 2
+                if ( 0 < abs(all_v_rel[3] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[3]/all_v_rel[4]) < 0.5): 
+                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30 *1.1, 0]
+                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
+                    tnx = 3
+                    tny = 2
+                if ( 0 < abs(all_v_rel[4] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[4]/all_v_rel[0]) < 0.5): 
+                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
+                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
+                    tnx = 3
+                    tny = 2
+                vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx				
+                vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / tny
                 vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
+                if (len(tnz)>1): 
+                    vp = np.sqrt(vx * vx + vy * vy) 
+                    #vz = (all_v_rel[tnz[0]]/vz_weight[tnz[0]]+all_v_rel[tnz[1]]/vz_weight[tnz[1]])/2 
+                #vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
+                #vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / 5
+                #vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
                 m = np.sqrt(vx * vx + vy * vy + vz * vz)
                 avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
                     self.past_5_velocity_magnitudes)
-                theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 1 else 0
-                phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 1 else 0
-                self.inbuf_other[0].append(vx)
-                self.inbuf_other[1].append(vy)
-                self.inbuf_other[2].append(vz)
-                self.inbuf_other[3].append(m)
-                self.inbuf_other[4].append(theta)
-                self.inbuf_other[5].append(phi)
+                theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
+
+
+                # modify m for phi --> 
+                # keep track of past 10 vx, vy, vz
+                # average of past 10 vx, average of past 10 vy, average of past 10 vz, and then calculate 
+                # a temporary m for phi with this value. 
+                # do only when sqrt(vx^2 + vy^2) < 0.5
+                # for visualization, to cancel out noise and approach 0
+                # Begin added by Yannan
+                if len(self.past_vx) < 10:
+                    self.past_vx.append(vx)
+                    self.past_vy.append(vy)
+                    self.past_vz.append(vz)
+                else:
+                    self.past_vx = self.past_vx[1:] + [vx]
+                    self.past_vy = self.past_vy[1:] + [vy]
+                    self.past_vz = self.past_vz[1:] + [vz]
+
+
+                if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
+                    temp_vx = mean(self.past_vx)
+                    temp_vy = mean(self.past_vy)
+                    temp_vz = mean(self.past_vz)
+                    m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+                if len(self.past_vx) < 20:
+                    phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
+                else:                    
+                    if abs(vz) < 0.5 and np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5:
+                        temp_vx = mean(self.past_vx)
+                        temp_vy = mean(self.past_vy)
+                        temp_vz = mean(self.past_vz)
+                        temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+                        phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+                    elif np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5: 
+                        temp_vx = mean(self.past_vx)
+                        temp_vy = mean(self.past_vy)
+                        temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(vz, 2))
+                        phi = np.arcsin(vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+                    elif abs(vz) < 0.5:
+                        temp_vz = mean(self.past_vz)
+                        temp_m = np.sqrt(pow(vx, 2) + pow(vy, 2) + pow(temp_vz, 2))
+                        phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+                    else:
+                    # End added by Yannan
+                        #original
+                        phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
+
+                self.general_graph_buffer[0].append((timestamp, vx))
+                self.general_graph_buffer[1].append((timestamp, vy))
+                self.general_graph_buffer[2].append((timestamp, vz))
+                self.general_graph_buffer[3].append((timestamp, m))
+                self.general_graph_buffer[4].append((timestamp, theta))
+                self.general_graph_buffer[5].append((timestamp, phi))
+
+                self.general_data[0].append((timestamp, vx))
+                self.general_data[1].append((timestamp, vy))
+                self.general_data[2].append((timestamp, vz))
+                self.general_data[3].append((timestamp, m))
+                self.general_data[4].append((timestamp, theta))
+                self.general_data[5].append((timestamp, phi))
                 self.past_5_velocity_magnitudes.append(m)
+
+            if len(self.general_data[0]) >= self.median_window_size:
+                for i in range(len(self.paths)):
+                    y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
+                    x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
+                    self.general_graph_buffer_med[i].append((x_med, y_med))
+
+                    y_med = np.median([x[1][3] for x in self.relative_data[i][-self.median_window_size:]]) # Median relative velocity
+                    x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
+                    self.toggle_graph_buffer_med[i].append((x_med, y_med))
 
         # Rotate over the readings to prepare for the next reading.
         self._prev_rel_phase = cur_rel_phase
         self._prev_abs_phase = self._cur_abs_phase
         self._cur_abs_phase = next_abs_phase
+    # Begin added by Yannan
+    # place check after for loop, all values have been appended
+    # self.toggle_graph_buffer[i].appends v_rel as well --> toggle canvas issue, second priority?
+    # otherwise, also need to pass this in and edit somehow (with temporary list, then extend + append possibly)
+    def velocity_outlier_filter(self, all_v_rel, cur_rel_phase):
+        outlier_index = -1
+        for i in range(len(all_v_rel)):
+            # Take mean of all values except value in question (not averaging whole thing?)
+            rest_of_lst = all_v_rel[0:i] + all_v_rel[i+1:]
+            avg = mean([abs(val) for val in rest_of_lst])
+            condition = avg < 0.5 and abs(all_v_rel[i]) > (avg + 1)
+            if condition:
+                outlier_index = i
+                continue            #assumes only one outlier
+        if outlier_index != -1:
+            # counter for each index 
+            self.past_5_counter[outlier_index] += 1
+            # > or >=?
+            if self.past_5_counter[outlier_index] >= 20:
+                # change cur_rel_phase, only change for incorrect index; mean of the rest of indices
+                (src, dst) = self.paths[outlier_index]
+                (dst, src) = self.paths[outlier_index]
+                new_val = (sum(cur_rel_phase.values()) - cur_rel_phase[(src, dst)] - cur_rel_phase[(dst, src)])/(len(cur_rel_phase)-2)
+                cur_rel_phase[(src, dst)] = new_val
+                cur_rel_phase[(dst, src)] = new_val
+                # all_v_rel[outlier_index] = avg
+                self.past_5_counter[outlier_index] = 0
+        else:
+            # reset counter if condition is not seen? intermittent issues?
+            for count in self.past_5_counter:
+                count = 0
 
+    def update_medians(self, median_window_size, is_toggle_graph, index):
+        # Todo: small bug where buffer may still hold a few medians using the old median window size. 
+        x_medians = []
+        y_medians = []
+        if is_toggle_graph:
+            if len(self.relative_data[index]) < median_window_size:
+                return ([], [])
+            for i in range(len(self.relative_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.relative_data[index][i : i + median_window_size]]))
+                y_medians.append(np.median([x[1][3] for x in self.relative_data[index][i : i + median_window_size]]))
+        else:
+            if len(self.general_data[index]) < median_window_size:
+                return ([], [])
+            for i in range(len(self.general_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.general_data[index][i : i + median_window_size]]))
+                y_medians.append(np.median([x[1] for x in self.general_data[index][i : i + median_window_size]]))
+        return (x_medians, y_medians)
+
+def mean(numbers):
+        return float(sum(numbers)) / max(len(numbers), 1)
+    # End added by Yannan
 # old implementation with Readings
     # Calculate the relative phases, velocities, and other values for this reading using PHASE ONLY
     # def _process_reading_phase(self, reading):
@@ -597,7 +759,8 @@ class AnemometerProcessor:
     #                 phase_ab = cur_rel_phase[str(a) + "_to_" + str(b)]
     #                 phase_ba = cur_rel_phase[str(b) + "_to_" + str(a)]
     #                 abs_phase_ab = self._cur_abs_phase[str(a) + "_to_" + str(b)]
-    #                 self.inbuf_toggle[i].append((phase_ab, phase_ba, abs_phase_ab, 0))
+    #                 self.toggle_graph_buffer_y[i].append((phase_ab, phase_ba, abs_phase_ab, 0))
+    #                 self.toggle_graph_buffer_x[i].append(reading.timestamp - self.start_time)
     #     # If not calibrating, calculate pairwise velocities.
     #     else:
     #         all_v_rel = []
@@ -623,10 +786,10 @@ class AnemometerProcessor:
     #                 avg = (v_ab + v_ba) / 2
     #                 temp = avg * avg / 400 - 273.15
     #                 # print(temp)
-    #                 self.inbuf_other[i].append(temp)
+    #                 self.general_graph_buffer_y[i].append(temp)
     #
-    #             # TODO: Maybe want to pass a datetime over in the inbuf
-    #             self.inbuf_toggle[i].append((phase_ab, phase_ba, abs_phase_ab, v_rel))
+    #             self.toggle_graph_buffer_y[i].append((phase_ab, phase_ba, abs_phase_ab, v_rel))
+    #             self.toggle_graph_buffer_x[i].append(reading.timestamp - self.start_time)
     #             all_v_rel.append(v_rel)
     #
     #         # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
@@ -645,12 +808,12 @@ class AnemometerProcessor:
     #                 self.past_5_velocity_magnitudes)
     #             theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 1 else 0
     #             phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 1 else 0
-    #             self.inbuf_other[0].append(vx)
-    #             self.inbuf_other[1].append(vy)
-    #             self.inbuf_other[2].append(vz)
-    #             self.inbuf_other[3].append(m)
-    #             self.inbuf_other[4].append(theta)
-    #             self.inbuf_other[5].append(phi)
+    #             self.general_graph_buffer_y[0].append(vx)
+    #             self.general_graph_buffer_y[1].append(vy)
+    #             self.general_graph_buffer_y[2].append(vz)
+    #             self.general_graph_buffer_y[3].append(m)
+    #             self.general_graph_buffer_y[4].append(theta)
+    #             self.general_graph_buffer_y[5].append(phi)
     #             self.past_5_velocity_magnitudes.append(m)
     #
     #     # Rotate over the readings to prepare for the next reading.
