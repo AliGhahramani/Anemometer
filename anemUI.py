@@ -8,6 +8,7 @@ from readings import *
 from anemUIProcessor import *
 from datetime import datetime
 from subprocess import Popen, PIPE, STDOUT
+import numpy as np
 
 progname = os.path.basename(sys.argv[0])
 progversion = "0.1"
@@ -22,10 +23,18 @@ INCLUDE_CALIBRATION = False
 duct_anemometer_ids = []
 room_anemometer_ids = []
 all_anemometer_ids = []
-executable_path = "./anemo"
+executable_path = "./input/src"
 # executable_path = "./anemomteer-master"
 # executable_path = "./src"
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
 
+    return os.path.join(base_path, relative_path)
 # OLD VERSION
 # def read_input():
 #     # p = Popen([executable_path], stdout=PIPE)
@@ -96,15 +105,17 @@ executable_path = "./anemo"
 #     print(p.stdout.read())  # (? probably unnecessary)
 
 def read_input():
-    p = Popen([executable_path], stdout=PIPE)
-    # p = Popen(["python", "input.py"], stdout=PIPE)  # if you want to simulate input from test dataset
+    new_env = os.environ.copy()
+    new_env['SITE_FILTER'] = 'site1'
+    p = Popen([executable_path], env=new_env, stdout=PIPE)
+    #p = Popen(["python", "input.py"], stdout=PIPE)  # if you want to simulate input from test dataset
     data_name = "MIRROR_STDOUT"
     num_sensors = 4
 
     while True:
         line = p.stdout.readline().decode("utf-8")[0:-1]  # strip newline at end
-        if len(line) > 0:
-            print("read ", line)
+        # if len(line) > 0:
+        #     print("read ", line)
         alldata.append(line)
 
         # not a data line, skip
@@ -114,12 +125,13 @@ def read_input():
         line = line[len(data_name) + 1:]  # trim off leading label
         data = json.loads(line)
         anemometer_id = data['Sensor']
+        timestamp = data['Timestamp']/1e9  # timestamp to seconds
 
         # not an anemometer of interest, skip
         if anemometer_id not in all_anemometer_ids:
             continue
 
-        parsed = DecodedRawInput()
+        parsed = DecodedRawInput(anemometer_id, timestamp)
         for sensor in range(0, num_sensors):
             sensor_data = data['RawInput']['ChirpHeaders'][sensor]
             parsed_sensor_data = DecodedChirpHeader(sensor, sensor_data['MaxIndex'],
