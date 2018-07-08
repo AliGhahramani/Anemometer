@@ -90,7 +90,7 @@ class ApplicationWindow(QtWidgets.QDialog):
         self.general_graphs = []
         for i in range(len(self.paths)):
             g = ToggleableGraph(self, anem_processor_owner, self.paths, i, self.main_widget, width=5, height=4, dpi=100)
-            self.general_graphs.append(g)
+            self.toggle_graphs.append(g)
             # l.addWidget(g)
             l.addWidget(g, i % 2, i//2 + 1)
 
@@ -157,7 +157,9 @@ class ApplicationWindow(QtWidgets.QDialog):
                 graph.update_median(new_median_window_size)
 
     def on_dump_graph_data_click(self):
-        f = open(resource_path('anemometer_graph_data_' + str(self.anemometer_id) + '.tsv'), 'w')
+        filename = 'anemometer_graph_data_' + str(self.anemometer_id) + '.tsv'
+        print("Attempting to save data to " + filename)
+        f = open(resource_path(filename), 'w')
 
         # write column labels
         f.write("time since start")
@@ -168,17 +170,18 @@ class ApplicationWindow(QtWidgets.QDialog):
         f.write("\n")
 
         # write all data lines
- #       for i in range(len(self.toggle_graphs[0].xdata)):
- #           f.write(str(self.toggle_graphs[0].xdata[i]))  # time since start
- #           for graph in self.toggle_graphs:
- #               if i < len(graph.ydata_vel):
- #                   f.write("\t" + str(graph.ydata_vel[i]))
- #           for graph in self.general_graphs:
- #               if i < len(graph.ydata):
- #                   f.write("\t" + str(graph.ydata[i]))
- #           f.write("\n")
+        for i in range(len(self.toggle_graphs[0].xdata)):
+            f.write(str(self.toggle_graphs[0].xdata[i]))  # time since start
+            for graph in self.toggle_graphs:
+                if i < len(graph.ydata_vel):
+                    f.write("\t" + str(graph.ydata_vel[i]))
+            for graph in self.general_graphs:
+                if i < len(graph.ydata):
+                    f.write("\t" + str(graph.ydata[i]))
+            f.write("\n")
 
         f.close()
+        print("Successfully saved data to " + filename)
 
 
 class ToggleableGraph(FigureCanvas):

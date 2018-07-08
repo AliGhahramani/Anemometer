@@ -105,6 +105,7 @@ def resource_path(relative_path):
 #     print(p.stdout.read())  # (? probably unnecessary)
 
 def read_input():
+    # Is os.environ.copy() necessary?
     new_env = os.environ.copy()
     new_env['SITE_FILTER'] = 'site1'
     p = Popen([executable_path], env=new_env, stdout=PIPE)
@@ -160,11 +161,13 @@ def read_anemometer_IDs():
 
 def dump_raw_data():
     print("Dumping all data")
-    f = open("./anemometer_raw_data.txt", 'w')
+    f = open(resource_path("anemometer_raw_data.txt"), 'w')
     for line in alldata:
         f.write(line)
         f.write('\n')
     f.close()
+    print("Successfully dumped all data to anemometer_raw_data.txt")
+
 
 
 def create_processors_readings_windows():
