@@ -9,11 +9,15 @@ class DecodedChirpHeader:
         self.imaginary = imaginary  # list of lists
 
 class DecodedRawInput:
-    def __init__(self,  anemometer_id="", timestamp=0, num_sensors=4, chirp_headers=None):
+    def __init__(self,  anemometer_id="", timestamp=0, site="", is_duct=False, is_duct6=False, is_room=False, num_sensors=4, chirp_headers=None):
         if chirp_headers is None:
             chirp_headers = []
         self.anemometer_id = anemometer_id
         self.timestamp = timestamp
+        self.site = site
+        self.is_duct = is_duct
+        self.is_duct6 = is_duct6
+        self.is_room = is_room
         self.num_sensors = num_sensors
         self.chirp_headers = chirp_headers
 
