@@ -531,7 +531,7 @@ class AnemometerProcessor:
                     temp_vz = mean(self.past_vz)
                     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
 
-                if len(self.past_vx) < 20:
+                if len(self.past_vx) < 10:
                     phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
                 else:                    
                     if abs(vz) < 0.5 and np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5:
