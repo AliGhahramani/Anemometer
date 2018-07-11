@@ -217,7 +217,7 @@ class AnemometerProcessor:
                 v_ba = d / (d / 343 + tof_ba)
                 v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
                 if self.is_duct:
-                    # v_rel = -v_rel  # sign is flipped for four path for other anemometer
+                    v_rel = -v_rel  # sign is flipped for four path for other anemometer
                     v_ab = d / (d / 344 - tof_ab)
                     v_ba = d / (d / 344 - tof_ba)
                     avg = (v_ab + v_ba) / 2
