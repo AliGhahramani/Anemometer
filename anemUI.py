@@ -1,9 +1,6 @@
 from __future__ import unicode_literals
-import sys
-import os
+import sys, os, threading, json, platform
 from PyQt5 import QtCore, QtWidgets
-import threading
-import json
 from readings import *
 from anemUIProcessor import *
 from datetime import datetime
@@ -32,8 +29,13 @@ def _process_input():
 
 # Generator function that runs the data streaming script and parses the incoming data, yielding the DecodedRawInput objects. Optionally filters for certain IDs and sites.
 def read_input(anemometer_ids=None, site_filter=None):
-    # open_args = ["./input/src"]
-    open_args = ["python", "input.py"] # if you want to simulate input from test dataset
+    operating_system = platform.system()
+    print("OS: ", operating_system)
+    if operating_system is "Windows":
+        open_args = ["./input/src.exe"]
+    else:
+        open_args = ["./input/src"]
+    # open_args = ["python", "input.py"] # if you want to simulate input from test dataset
     if site_filter is None:
         p = Popen(open_args, stdout=PIPE)
     else:
