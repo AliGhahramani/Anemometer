@@ -20,8 +20,8 @@ class AnemometerSiteWidget(QWidget):
 
 # Opens data stream and adds anemometers to UI list.
 def _process_input():
-    readings_generator = anemUI.read_input(True)
-    for reading in readings_generator:
+    readings_generator = anemUI.read_input()
+    for (reading, line) in readings_generator:
         if reading.anemometer_id not in anemometers:
             print("Found new anemometer: ", reading.anemometer_id)
             anemometer_type = "Duct"
@@ -62,6 +62,5 @@ if __name__ == '__main__':
 
     # start the app
     window.show()
-\
     sys.exit(app.exec_())
     

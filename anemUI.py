@@ -22,27 +22,31 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def _process_input():
-    readings_generator = read_input(False)
-    for reading in readings_generator:
+    readings_generator = read_input(all_anemometer_ids, site_id)
+    for (reading, line) in readings_generator:
+        # if len(line) > 0:
+        #     print("read ", line)
+        alldata.append(line)
         anemometer_processors[reading.anemometer_id].process_reading(reading)
 
 
-# Generator function that runs the data streaming script and parses the incoming data, yielding the DecodedRawInput objects.
-def read_input(from_site_UI):
-    # Is os.environ.copy() necessary?
-    new_env = os.environ.copy()
-    new_env['SITE_FILTER'] = 'site1'
-    # p = Popen(["./input/src"], env=new_env, stdout=PIPE)
-    p = Popen(["python", "input.py"], env=new_env, stdout=PIPE)  # if you want to simulate input from test dataset
+# Generator function that runs the data streaming script and parses the incoming data, yielding the DecodedRawInput objects. Optionally filters for certain IDs and sites.
+def read_input(anemometer_ids=None, site_filter=None):
+    # open_args = ["./input/src"]
+    open_args = ["python", "input.py"] # if you want to simulate input from test dataset
+    if site_filter is None:
+        p = Popen(open_args, stdout=PIPE)
+    else:
+        new_env = os.environ.copy() # Is os.environ.copy() necessary?
+        new_env['SITE_FILTER'] = site_filter
+        p = Popen(open_args, env=new_env, stdout=PIPE)
+    
     data_prefix = "MIRROR_STDOUT"
     num_sensors = 4
 
     while True:
-        line = p.stdout.readline().decode("utf-8")[0:-1]  # strip newline at end
-        # if len(line) > 0:
-        #     print("read ", line)
-        if not from_site_UI:
-            alldata.append(line)
+        line_orig = p.stdout.readline().decode("utf-8")
+        line = line_orig[0:-1] # strip trailing newline
 
         # not a data line, skip
         if len(line) < len(data_prefix) or line[0:len(data_prefix)] != data_prefix:
@@ -52,7 +56,7 @@ def read_input(from_site_UI):
         data = json.loads(line)
         anemometer_id = data['Sensor']
         # If not an anemometer of interest, skip
-        if not from_site_UI and anemometer_id not in all_anemometer_ids:
+        if anemometer_ids is not None and anemometer_id not in anemometer_ids:
             continue
 
         timestamp = data['Timestamp']/1e9  # timestamp to seconds
@@ -74,7 +78,7 @@ def read_input(from_site_UI):
             # print(parsed_sensor_data.id, parsed_sensor_data.max_indices, parsed_sensor_data.real, parsed_sensor_data.imaginary)
             parsed.add_chirp_header(parsed_sensor_data)
 
-        yield parsed
+        yield (parsed, line_orig)
 
     # When the subprocess terminates there might be unconsumed outputthat still needs to be processed.
     print(p.stdout.read())  # (? probably unnecessary)
@@ -84,12 +88,14 @@ def read_anemometer_IDs():
     for line in id_file:
         words = line.split()
         if len(words) == 2:
-            if words[1] == "duct":
+            if words[0] == "site:":
+                site_id = words[1]    # Assumes siteID has no spaces
+            elif words[1] == "duct":
                 duct_anemometer_ids.append(words[0])
             elif words[1] == "room":
                 room_anemometer_ids.append(words[0])
 
-    return (duct_anemometer_ids, room_anemometer_ids)
+    return (duct_anemometer_ids, room_anemometer_ids, site_id)
     
 
 
@@ -116,6 +122,7 @@ def _create_processors_and_windows():
 if __name__ == '__main__':
     alldata = []  # list of all input data lines as is
     anemometer_processors = {}  # {anemometer_id : AnemometerProcessor}
+    site_id = ""
     duct_anemometer_ids = []
     room_anemometer_ids = []
     all_anemometer_ids = []
@@ -128,7 +135,7 @@ if __name__ == '__main__':
     mainWindow.setWindowTitle("Main hub")
 
     # Set up anemometer stream processors
-    duct_anemometer_ids, room_anemometer_ids = read_anemometer_IDs()
+    duct_anemometer_ids, room_anemometer_ids, site_id = read_anemometer_IDs()
     all_anemometer_ids = duct_anemometer_ids + room_anemometer_ids
     print("Tracking duct anemometers: ", duct_anemometer_ids)
     print("Tracking room anemometers: ", room_anemometer_ids)
