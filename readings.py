@@ -34,6 +34,9 @@ class DecodedRawInput:
     def get_imaginary(self, src, dst):
         return self.chirp_headers[src].imaginary[dst]
 
+    def get_temperature(self):
+        return self.temperature
+
 # old implementation
 # class PathReading:
 #     EXPECTED_DATA_COUNT = 16 # expected 16 readings per real/im/mag for each path
