@@ -51,6 +51,8 @@ class AnemometerProcessor:
                 list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
             self._calibrated_index = {}  # {src, dst): index}
         else:
+            self._prev_abs_phase = {}
+
             self._calibration_indices = defaultdict(list)
             self._calibration_phases = defaultdict(list)
             self._calibration_temperatures = []
@@ -83,7 +85,7 @@ class AnemometerProcessor:
         num_sensors = reading.num_sensors
         timestamp = time.time() - self.start_time
 
-        next_abs_phase, read_index = self._get_abs_phase(reading)
+        next_abs_phase, read_index = self._get_abs_phase(reading, self._cur_abs_phase)
         cur_rel_phase = self._infer_rel_phase(next_abs_phase)
 
         # If calibrating, track phase and max index
@@ -159,7 +161,7 @@ class AnemometerProcessor:
         timestamp = time.time() - self.start_time
         temp = reading.get_temperature()
 
-        abs_phases, read_indices = self._get_abs_phase(reading)
+        abs_phases, read_indices = self._get_abs_phase(reading, self._prev_abs_phase)
         # Track index, phase, and temp during calibration
         if self.is_calibrating:
             for src in range(0, num_sensors):
@@ -175,7 +177,7 @@ class AnemometerProcessor:
                     self._calibration_phases[(0, 1)]) >= self.calibration_period:
                 self._calibrated_phase, self._calibrated_index, self._calibrated_temperature = self._finish_calibration(
                     self._calibration_phases, self._calibration_indices, self._calibration_temperatures)
-                self._calibrated_TOF = self.temp_to_TOF(self._calibrated_TOF)
+                self._calibrated_TOF = self.temp_to_TOF(self._calibrated_temperature)
 
             if self.include_calibration:
                 self._graph_calibration_phase(abs_phases, abs_phases, timestamp)
@@ -220,6 +222,9 @@ class AnemometerProcessor:
                 self.past_5_velocity_magnitudes.append(m)
 
             self._graph_medians()
+
+        # Save absolute phase for reference
+        self._prev_abs_phase = abs_phases
 
     # this does not work with new reading form
     # Calculate the relative phases, velocities, and other values for this reading using MAGNITUDE
@@ -566,7 +571,7 @@ class AnemometerProcessor:
     # ================HELPER FUNCTIONS=================
 
     # Returns map of (src, dst) to absolute phase from reading, as well as read index.
-    def _get_abs_phase(self, reading):
+    def _get_abs_phase(self, reading, default_phase=None):
         num_sensors = reading.num_sensors
         data_len = 4
         abs_phases = {}  # {(src, dst) : phase in degrees}
@@ -590,7 +595,13 @@ class AnemometerProcessor:
                           ", index out of range.\n\t", "current max index:", cur_max_index,
                           "calibrated max index:", self._calibrated_index[(src, dst)],
                           "read index:", read_index)
-                    abs_phases[(src, dst)] = 0
+                    if default_phase is not None and (src, dst) in default_phase:
+                        phase = default_phase[(src, dst)]
+                        print("Replacing with phase ", phase)
+                        abs_phases[(src, dst)] = phase
+                    else:
+                        print("Replacing with phase 0.")
+                        abs_phases[(src, dst)] = 0
                 else:
                     i = reading.get_imaginary(src, dst)[read_index]
                     q = reading.get_real(src, dst)[read_index]
@@ -747,6 +758,8 @@ class AnemometerProcessor:
         expected_phase = self._calibrated_phase[(src, dst)] + expected_phase_difference
         actual_phase = absolute_phases[(src, dst)]
         phase_correction = closest_rotation(expected_phase, actual_phase)
+        # print("Path ", (src, dst), ", calibrated ", self._calibrated_phase[(src, dst)], ", expected change ",
+        #       expected_phase_difference, ", actual ", absolute_phases[(src, dst)], " correction: ", phase_correction)
         return phase_correction
 
 
