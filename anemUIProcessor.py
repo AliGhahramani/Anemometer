@@ -8,13 +8,13 @@ from anemUIWindow import *
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
     def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period=10,
-                 include_calibration=False, phase_only=True):
+                 include_calibration=False):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
         self.data_dump_func = data_dump_func
         self.calibration_period = calibration_period
         self.include_calibration = include_calibration
-        self.phase_only = phase_only
+        self.algorithm = 1  # 0: phase only. 1: Temperature guided\
         self.is_calibrating = True
         self.aw = None
         self.start_time = time.time()
@@ -30,30 +30,37 @@ class AnemometerProcessor:
         l = len(self.paths)
 
         # Graph buffers, containing data to be added to the graphs
-        self.toggle_graph_buffer = [[] for i in range(0, l)]       # list of (# paths) lists. Each list holds a tuple in form (timestamp, (rel_a_b, rel_b_a, abs_a_b, rel_vel)) that has yet to be graphed on a toggle-able graph
-        self.general_graph_buffer = [[] for i in range(0, l)]      # Same behavior as toggle_graph_buffer, different contents (duct: (timestamp, temp) per path, room: timestamp, and one of vx, vy, vz, m, theta, phi)
-        self.toggle_graph_buffer_med = [[] for i in range(0, l)]   # medians
+        self.toggle_graph_buffer = [[] for i in range(0,
+                                                      l)]  # list of (# paths) lists. Each list holds a tuple in form (timestamp, (rel_a_b, rel_b_a, abs_a_b, rel_vel)) that has yet to be graphed on a toggle-able graph
+        self.general_graph_buffer = [[] for i in range(0,
+                                                       l)]  # Same behavior as toggle_graph_buffer, different contents (duct: (timestamp, temp) per path, room: timestamp, and one of vx, vy, vz, m, theta, phi)
+        self.toggle_graph_buffer_med = [[] for i in range(0, l)]  # medians
         self.general_graph_buffer_med = [[] for i in range(0, l)]  # medians
 
         # Data history
-        self.relative_data = [[] for i in range(0, l)]    # Same tuple data as toggle_graph_buffer, but for all data
-        self.general_data = [[] for i in range(0, l)]     # Same tuple data as general_graph_buffer, but for all data
+        self.relative_data = [[] for i in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
+        self.general_data = [[] for i in range(0, l)]  # Same tuple data as general_graph_buffer, but for all data
 
-        if phase_only:
+        if self.algorithm is 0:
             self._prev_rel_phase = {}  # {(src, dst) : number}
             self._prev_abs_phase = {}  # {(src, dst) : number}
             self._cur_abs_phase = {}  # {(src, dst) : number}
-            self._calibration_phases = {}  # {(src, dst) : []}, used to hold rel phases during calibration period
-            self._calibration_indices = {}  # {src, dst): []}, used to hold indices of max-2 during calibration period
+            self._calibration_phases = defaultdict(
+                list)  # {(src, dst) : []}, used to hold rel phases during calibration period
+            self._calibration_indices = defaultdict(
+                list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
             self._calibrated_index = {}  # {src, dst): index}
         else:
+            self._prev_abs_phase = {}
+
             self._calibration_indices = defaultdict(list)
-            self._calibration_magnitudes = defaultdict(list)
             self._calibration_phases = defaultdict(list)
+            self._calibration_temperatures = []
 
             self._calibrated_index = {}
-            self._calibrated_magnitude = {}
             self._calibrated_phase = {}
+            self._calibrated_temperature = 0
+            self._calibrated_TOF = 0
 
         # Added by Yannan
         self.past_5_counter = [0, 0, 0, 0, 0, 0]
@@ -61,22 +68,163 @@ class AnemometerProcessor:
         self.past_vx = []
         self.past_vy = []
         self.past_vz = []
-        #duct is 4
+        # duct is 4
         # End added by Yannan
-    def generate_window(self):
-        self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
-        return self.aw
-
-    def dump_raw_data(self):
-        self.data_dump_func()
 
     def process_reading(self, reading):
-        if self.phase_only:
-            # print("phase_only!!!!!!!!!!!!!!!")
+        if self.algorithm is 0:  # phase only
             self._process_reading_phase(reading)
+        elif self.algorithm is 1:  # temperature guided
+            self._process_reading_temperature(reading)
         else:
-            # print("magnitude!!!!!!!!!!!!")
-            self._process_reading_magnitude(reading)
+            print("Error: Invalid algorithm type")
+
+    def _process_reading_phase(self, reading):
+        # For each path, calculate absolute phase of reading 2 before max magnitude
+        print(self.anemometer_id, "processing reading")
+        num_sensors = reading.num_sensors
+        timestamp = time.time() - self.start_time
+
+        next_abs_phase, read_index = self._get_abs_phase(reading, self._cur_abs_phase)
+        cur_rel_phase = self._infer_rel_phase(next_abs_phase)
+
+        # If calibrating, track phase and max index
+        if self.is_calibrating:
+            for src in range(0, num_sensors):
+                for dst in range(0, num_sensors):
+                    if src == dst:
+                        continue
+                    if (src, dst) in cur_rel_phase:
+                        self._calibration_phases[(src, dst)].append(cur_rel_phase[(src, dst)])
+                    self._calibration_indices[(src, dst)].append(reading.get_max_index(src, dst))
+
+            # finish calibration if applicable
+            if len(self._calibration_phases) == num_sensors * (num_sensors - 1) and len(
+                    self._calibration_phases[(0, 1)]) >= self.calibration_period:
+                self.is_calibrating = False
+                calibrated_phases, self._calibrated_index, _ = self._finish_calibration(self._calibration_phases,
+                                                                                        self._calibration_indices, None)
+                for (src, dst), phase in calibrated_phases.items():
+                    cur_rel_phase[(src, dst)] -= phase
+
+            # If include_calibration, also graph the phases during calibration period.
+            if self.include_calibration and cur_rel_phase != {}:
+                self._graph_calibration_phase(cur_rel_phase, self._cur_abs_phase, timestamp)
+
+        # If not calibrating, calculate pairwise velocities.
+        else:
+            # TODO: scale distances properly for duct
+            d = 0.1875 if self.is_duct else 0.06
+            all_v_rel = []
+
+            for i in range(len(self.paths)):
+                (src, dst) = self.paths[i]
+                phase_ab = cur_rel_phase[(src, dst)]
+                phase_ba = cur_rel_phase[(dst, src)]
+                abs_phase_ab = self._cur_abs_phase[(src, dst)]
+                velocity, temp = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
+                temp = reading.temperature
+
+                self.add_to_toggle_graph((timestamp, (phase_ab, phase_ba, abs_phase_ab, velocity)), i)
+                if self.is_duct:
+                    self.add_to_general_graph((timestamp, temp), i)
+                all_v_rel.append(velocity)
+
+            # Added by Yannan
+            self._velocity_outlier_filter(all_v_rel, cur_rel_phase)
+            # End added by Yannan
+
+            # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
+            if not self.is_duct:
+                vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
+                self._update_directional_vel(vx, vy, vz)
+                m, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+
+                self.add_to_general_graph((timestamp, vx), 0)
+                self.add_to_general_graph((timestamp, vy), 1)
+                self.add_to_general_graph((timestamp, vz), 2)
+                self.add_to_general_graph((timestamp, m), 3)
+                self.add_to_general_graph((timestamp, theta), 4)
+                self.add_to_general_graph((timestamp, phi), 5)
+                self.past_5_velocity_magnitudes.append(m)
+
+            self._graph_medians()
+
+        # Rotate over the readings to prepare for the next reading.
+        self._prev_rel_phase = cur_rel_phase
+        self._prev_abs_phase = self._cur_abs_phase
+        self._cur_abs_phase = next_abs_phase
+
+    def _process_reading_temperature(self, reading):
+        print(self.anemometer_id, "processing reading")
+        num_sensors = reading.num_sensors
+        timestamp = time.time() - self.start_time
+        temp = reading.get_temperature()
+
+        abs_phases, read_indices = self._get_abs_phase(reading, self._prev_abs_phase)
+        # Track index, phase, and temp during calibration
+        if self.is_calibrating:
+            for src in range(0, num_sensors):
+                for dst in range(0, num_sensors):
+                    if src == dst:
+                        continue
+                    self._calibration_indices[(src, dst)].append(reading.get_max_index(src, dst))
+                    self._calibration_phases[(src, dst)].append(abs_phases[(src, dst)])
+            self._calibration_temperatures.append(temp)
+
+            # finish calibration if applicable
+            if len(self._calibration_phases) == num_sensors * (num_sensors - 1) and len(
+                    self._calibration_phases[(0, 1)]) >= self.calibration_period:
+                self._calibrated_phase, self._calibrated_index, self._calibrated_temperature = self._finish_calibration(
+                    self._calibration_phases, self._calibration_indices, self._calibration_temperatures)
+                self._calibrated_TOF = self.temp_to_TOF(self._calibrated_temperature)
+
+            if self.include_calibration:
+                self._graph_calibration_phase(abs_phases, abs_phases, timestamp)
+        # If not calibrating, calculate pairwise velocities
+        else:
+            d = 0.1875 if self.is_duct else 0.06
+            all_v_rel = []
+            TOF_temp = self.temp_to_TOF(temp)
+            TOF_diff = self._calibrated_TOF - TOF_temp
+            f = 180000  # 180000 khz
+            phase_diff = TOF_diff * f * 360
+
+            for i in range(len(self.paths)):
+                (src, dst) = self.paths[i]
+                corr_ab = self._phase_correction(src, dst, phase_diff, abs_phases)
+                corr_ba = self._phase_correction(dst, src, phase_diff, abs_phases)
+                avg = (corr_ab + corr_ba) / 2
+                delta = (corr_ab - corr_ba) / 2
+                phase_ab = phase_diff + avg + delta
+                phase_ba = phase_diff + avg - delta
+                abs_phase_ab = abs_phases[(src, dst)]
+                velocity, temp = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
+                temp = reading.temperature
+
+                self.add_to_toggle_graph((timestamp, (phase_ab, phase_ba, abs_phase_ab, velocity)), i)
+                if self.is_duct:
+                    self.add_to_general_graph((timestamp, temp), i)
+                all_v_rel.append(velocity)
+
+            # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
+            if not self.is_duct:
+                vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
+                self._update_directional_vel(vx, vy, vz)
+                m, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+
+                self.add_to_general_graph((timestamp, vx), 0)
+                self.add_to_general_graph((timestamp, vy), 1)
+                self.add_to_general_graph((timestamp, vz), 2)
+                self.add_to_general_graph((timestamp, m), 3)
+                self.add_to_general_graph((timestamp, theta), 4)
+                self.add_to_general_graph((timestamp, phi), 5)
+                self.past_5_velocity_magnitudes.append(m)
+
+            self._graph_medians()
+
+        # Save absolute phase for reference
+        self._prev_abs_phase = abs_phases
 
     # this does not work with new reading form
     # Calculate the relative phases, velocities, and other values for this reading using MAGNITUDE
@@ -121,12 +269,10 @@ class AnemometerProcessor:
                 if abs_phase[path_string] < 0:
                     abs_phase[path_string] += 360
                 magnitude[path_string] = path_reading.mag[index]
-                magnitude_per_wave[path_string] = (path_reading.mag[index + 1] - path_reading.mag[index])/8
+                magnitude_per_wave[path_string] = (path_reading.mag[index + 1] - path_reading.mag[index]) / 8
 
             if path_string == "0_to_1":
                 print("using index ", index, "from mags", path_reading.mag, ", got ", magnitude[path_string])
-
-
 
         # If calibrating, track phase and magnitude
         if self.is_calibrating:
@@ -136,7 +282,8 @@ class AnemometerProcessor:
                 self._calibration_magnitudes[path_string].append(m)
 
             # finish calibration if applicable
-            if len(self._calibration_phases) == 16 and len(self._calibration_phases["0_to_1"]) >= self.calibration_period:
+            if len(self._calibration_phases) == 16 and len(
+                    self._calibration_phases["0_to_1"]) >= self.calibration_period:
                 self.is_calibrating = False
 
                 for path_string, index_list in self._calibration_indices.items():
@@ -188,8 +335,8 @@ class AnemometerProcessor:
                 max_wave_change = 3
                 m_compare = []
 
-                for i in range(-max_wave_change, max_wave_change+1):
-                    v = m_c + ((p - p_c)/360 + i) * mpw # try + and - ...
+                for i in range(-max_wave_change, max_wave_change + 1):
+                    v = m_c + ((p - p_c) / 360 + i) * mpw  # try + and - ...
                     m_compare.append(v)
 
                 i = (np.abs(np.subtract(m_compare, [m] * len(m_compare)))).argmin() - max_wave_change
@@ -238,10 +385,10 @@ class AnemometerProcessor:
                 vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
                 vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
                 vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-                vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx				
+                vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx
                 vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / tny
                 vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
- 
+
                 m = np.sqrt(vx * vx + vy * vy + vz * vz)
                 avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
                     self.past_5_velocity_magnitudes)
@@ -263,61 +410,207 @@ class AnemometerProcessor:
                 self.past_5_velocity_magnitudes.append(m)
 
             # Calculate median over window and put in buffer
-            if len(self.general_data[0]) >= self.median_window_size:
-                for i in range(len(self.paths)):
-                    y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
-                    x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
-                    self.general_graph_buffer_med[i].append((x_med, y_med))
+            self._graph_medians()
 
-                    y_med = np.median([x[1][3] for x in self.relative_data[i][-self.median_window_size:]]) # Median relative velocity
-                    x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
-                    self.toggle_graph_buffer_med[i].append((x_med, y_med))
+    # ================PUBLIC FUNCTIONS=================
 
+    def generate_window(self):
+        self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
+        return self.aw
 
-    def _process_reading_phase(self, reading):
-        # For each path, calculate absolute phase of reading 2 before max magnitude
-        print(self.anemometer_id, "processing reading")
+    def dump_raw_data(self):
+        self.data_dump_func()
+
+    def update_medians(self, median_window_size, is_toggle_graph, index):
+        # Todo: small bug where buffer may still hold a few medians using the old median window size.
+        x_medians = []
+        y_medians = []
+        if is_toggle_graph:
+            if len(self.relative_data[index]) < median_window_size:
+                return ([], [])
+            for i in range(len(self.relative_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.relative_data[index][i: i + median_window_size]]))
+                y_medians.append(np.median([x[1][3] for x in self.relative_data[index][i: i + median_window_size]]))
+        else:
+            if len(self.general_data[index]) < median_window_size:
+                return ([], [])
+            for i in range(len(self.general_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.general_data[index][i: i + median_window_size]]))
+                y_medians.append(np.median([x[1] for x in self.general_data[index][i: i + median_window_size]]))
+        return (x_medians, y_medians)
+
+    def temp_to_TOF(self, temperature):
+        speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
+        dist = 0.1875 if self.is_duct else 0.06
+        return dist / speed
+
+    def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
+        tof_ab = phase_ab / (360 * 180000)  # khz?
+        tof_ba = phase_ba / (360 * 180000)
+
+        if self.is_duct:
+            v_ab = dist / (dist / 344 - tof_ab)
+            v_ba = dist / (dist / 344 - tof_ba)
+        else:
+            v_ab = dist / (dist / 343 + tof_ab)
+            v_ba = dist / (dist / 343 + tof_ba)
+
+        v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
+        avg = (v_ab + v_ba) / 2
+        temp = avg * avg / 400 - 273.15
+        return v_rel, temp
+
+    # Calculate directional velocities (vx, vy, vz) for room anemometer.
+    # Weighted assuming node 1 at bottom. Path velocities must be in order
+    def path_vel_to_directional_vel(self, path_vel):
+        sin30 = np.sin(np.pi / 6)
+        sin60 = np.sin(np.pi / 3)
+        vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
+        vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
+        vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+        # vx_weight = [0, sin60, 0, 0, 0, -sin60]
+        # vy_weight = [0, sin30, 1, 0, 0, sin30]
+        # vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+        tnx = 5  # 6 if 15degree coordinate system
+        tny = 5  # 6 if 15degree coordinate system
+        tnz = []
+        if (0 > abs(path_vel[1]) / path_vel[2] > - 0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5):
+            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
+            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            tnx = 2
+            tny = 3
+            tnz = [0, 3]
+        if (0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5):
+            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
+            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            tnx = 2
+            tny = 3
+            tnz = [0, 4]
+        if (0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5):
+            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
+            vy_weight = [0, sin30 * 0.85, 1 * 0.8, 0, 0, sin30 * 0.85]
+            tnx = 2
+            tny = 3
+            tnz = [3, 4]
+        #
+        if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5):
+            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
+            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            tnx = 3
+            tny = 2
+        if (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5):
+            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
+            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            tnx = 3
+            tny = 2
+        if (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
+            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
+            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            tnx = 3
+            tny = 2
+        vx = sum(sorted([i[0] / i[1] for i in zip(path_vel, vx_weight) if i[1] != 0])) / tnx
+        vy = sum(sorted([i[0] / i[1] for i in zip(path_vel, vy_weight) if i[1] != 0])) / tny
+        vz = sum(sorted([i[0] / i[1] for i in zip(path_vel, vz_weight) if i[1] != 0])) / 3
+        if (len(tnz) > 1):
+            vp = np.sqrt(vx * vx + vy * vy)
+            # vz = (all_v_rel[tnz[0]]/vz_weight[tnz[0]]+all_v_rel[tnz[1]]/vz_weight[tnz[1]])/2
+        # vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
+        # vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / 5
+        # vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
+        return vx, vy, vz
+
+    def directional_velocities_to_spherical_coordinates(self, vx, vy, vz):
+        m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
+            self.past_5_velocity_magnitudes)
+        theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
+        # modify m for phi -->
+        # keep track of past 10 vx, vy, vz
+        # average of past 10 vx, average of past 10 vy, average of past 10 vz, and then calculate
+        # a temporary m for phi with this value.
+        # do only when sqrt(vx^2 + vy^2) < 0.5
+        # for visualization, to cancel out noise and approach 0
+        # Begin added by Yannan
+        if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
+            temp_vx = mean(self.past_vx)
+            temp_vy = mean(self.past_vy)
+            temp_vz = mean(self.past_vz)
+            m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        if len(self.past_vx) < 10:
+            phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
+        else:
+            if abs(vz) < 0.5 and np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5:
+                temp_vx = mean(self.past_vx)
+                temp_vy = mean(self.past_vy)
+                temp_vz = mean(self.past_vz)
+                temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+                phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+            elif np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5:
+                temp_vx = mean(self.past_vx)
+                temp_vy = mean(self.past_vy)
+                temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(vz, 2))
+                phi = np.arcsin(vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+            elif abs(vz) < 0.5:
+                temp_vz = mean(self.past_vz)
+                temp_m = np.sqrt(pow(vx, 2) + pow(vy, 2) + pow(temp_vz, 2))
+                phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
+            else:
+                # End added by Yannan
+                # original
+                phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
+        return m, theta, phi
+
+    def add_to_general_graph(self, point, index):
+        self.general_graph_buffer[index].append(point)
+        self.general_data[index].append(point)
+
+    def add_to_toggle_graph(self, point, index):
+        self.toggle_graph_buffer[index].append(point)
+        self.relative_data[index].append(point)
+
+    # ================HELPER FUNCTIONS=================
+
+    # Returns map of (src, dst) to absolute phase from reading, as well as read index.
+    def _get_abs_phase(self, reading, default_phase=None):
         num_sensors = reading.num_sensors
         data_len = 4
-
-        # figure out where to read from, and calculate absolute phase
-        next_abs_phase = {}  # {(src, dst) : phase in degrees}
-        read_index = {}  # {(src, dst) : index offset from this reading's max on which to do calculations }
-        # timestamp = reading.timestamp - self.start_time
-        timestamp = time.time() - self.start_time
+        abs_phases = {}  # {(src, dst) : phase in degrees}
+        read_indices = {}  # {(src, dst) : index offset from this reading's max on which to do calculations}
         for src in range(0, num_sensors):
             for dst in range(0, num_sensors):
                 if src == dst:
-                    continue # don't process anything for self-loops
-                cur_max_index = reading.get_max_index(src, dst)
+                    continue
 
                 if self.is_calibrating:
-                    if (src, dst) not in self._calibration_indices:
-                        self._calibration_indices[(src, dst)] = []
-                    self._calibration_indices[(src, dst)].append(cur_max_index)
                     offset_from_max = -2
-                    read_index[(src, dst)] = data_len + offset_from_max - 1
                 else:
-                    max_index = self._calibrated_index[(src, dst)]
-                    offset_from_max = -2 + (max_index - cur_max_index)
-                    read_index[(src, dst)] = data_len + offset_from_max - 1
-                    # print("cur_max_index", cur_max_index, "max_index", max_index, "read_index", read_index[(src, dst)])
+                    calibrated_max_index = self._calibrated_index[(src, dst)]
+                    cur_max_index = reading.get_max_index(src, dst)
+                    offset_from_max = -2 + (calibrated_max_index - cur_max_index)
+                read_index = data_len + offset_from_max - 1
+                read_indices[(src, dst)] = read_index
 
-                if read_index[(src, dst)] < 0 or read_index[(src, dst)] >= data_len:
+                if read_index < 0 or read_index >= data_len:
                     print(self.anemometer_id, "ERROR: Couldn't find maximum magnitude for path ", (src, dst),
-                          ", index out of range.\n\t", "cur_max_index", cur_max_index,
-                          "max_index", self._calibrated_index[(src, dst)],
-                          "read_index", read_index[(src, dst)])
-                    next_abs_phase[(src, dst)] = 0
+                          ", index out of range.\n\t", "current max index:", cur_max_index,
+                          "calibrated max index:", self._calibrated_index[(src, dst)],
+                          "read index:", read_index)
+                    if default_phase is not None and (src, dst) in default_phase:
+                        phase = default_phase[(src, dst)]
+                        print("Replacing with phase ", phase)
+                        abs_phases[(src, dst)] = phase
+                    else:
+                        print("Replacing with phase 0.")
+                        abs_phases[(src, dst)] = 0
                 else:
-                    i = reading.get_imaginary(src, dst)[read_index[(src, dst)]]
-                    q = reading.get_real(src, dst)[read_index[(src, dst)]]
-                    next_abs_phase[(src, dst)] = np.arctan2(i, q) * 180 / np.pi
+                    i = reading.get_imaginary(src, dst)[read_index]
+                    q = reading.get_real(src, dst)[read_index]
+                    abs_phases[(src, dst)] = np.arctan2(i, q) * 180 / np.pi
+        return abs_phases, read_indices
 
-
-
-        # Infer current reading's relative phase, using previous relative phase, and previous, current,
-        # and next absolute phases. See README
+    # Infer current reading's relative phase, using previous relative phase, and previous, current,
+    # and next absolute phases. See README
+    def _infer_rel_phase(self, next_abs_phase):
         cur_rel_phase = {}
         outlier_range = 80  # if difference of this reading from previous reading is within X degrees of 180 degrees, can assume it's (dangerous) reading error
         jerk_limit = 120  # tolerates at most an X difference in phase deltas
@@ -337,7 +630,8 @@ class AnemometerProcessor:
                 cur_sign = 1 if cur_delta >= 0 else -1
                 next_sign = 1 if next_delta >= 0 else -1
                 cur_wrapped_delta = cur_delta if abs(cur_delta) < 180 else -1 * cur_sign * (360 - abs(cur_delta))
-                next_wrapped_delta = next_delta if abs(next_delta) < 180 else -1 * next_sign * (360 - abs(next_delta))
+                next_wrapped_delta = next_delta if abs(next_delta) < 180 else -1 * next_sign * (
+                        360 - abs(next_delta))
 
                 if ((180 - abs(cur_wrapped_delta)) <= outlier_range) or \
                         (abs(cur_wrapped_delta - next_wrapped_delta) > jerk_limit):
@@ -365,238 +659,72 @@ class AnemometerProcessor:
                 (src, dst) = deltas[-1][1]
                 cur_rel_phase[(src, dst)] = self._prev_rel_phase[(src, dst)]
                 self._cur_abs_phase[(src, dst)] = self._prev_abs_phase[(src, dst)]
+        return cur_rel_phase
 
+    def _graph_calibration_phase(self, relative_phases, absolute_phases, timestamp):
+        for i in range(len(self.paths)):
+            (src, dst) = self.paths[i]
+            phase_ab = relative_phases[(src, dst)]
+            phase_ba = relative_phases[(dst, src)]
+            abs_phase_ab = absolute_phases[(src, dst)]
+            self.toggle_graph_buffer[i].append(timestamp, (phase_ab, phase_ba, abs_phase_ab, 0))
 
-        # If calibrating, track phase
-        if self.is_calibrating:
-            for (src, dst), rel_phase in cur_rel_phase.items():
-                if (src, dst) not in self._calibration_phases:
-                    self._calibration_phases[(src, dst)] = []
-                self._calibration_phases[(src, dst)].append(rel_phase)
-
-            # finish calibration if applicable
-            if len(self._calibration_phases) == num_sensors * (num_sensors - 1) and len(
-                    self._calibration_phases[(0, 1)]) >= self.calibration_period:
-                self.is_calibrating = False
-                for (src, dst), phase_list in self._calibration_phases.items():
-                    print("I am ", self.anemometer_id, " with path ", (src, dst), ", phases: ", phase_list)
-                    m = np.mean(phase_list)
-                    sd = np.std(phase_list)
-                    if sd == 0:
-                        continue
-                    s = 0
-                    count = 0
-                    for v in phase_list:
-                        if abs(v - m) / sd < 2:
-                            s += v
-                            count += 1
-                    if count != 0:
-                        cur_rel_phase[(src, dst)] -= s / count
-
-                for (src, dst), index_list in self._calibration_indices.items():
-                    index_list = [i for i in index_list if i >= 0]  # ignore all invalid indices
-                    index_mode = 0
-                    if len(index_list) > 0:  # possible if max is usually at index 0 or 1
-                        index_mode = max(set(index_list), key=index_list.count)
-                    self._calibrated_index[(src, dst)] = index_mode
-                    print(self.anemometer_id, "index[", (src, dst), "] = ", index_list, ", mode =", index_mode)
-
-            # If include_calibration, also graph the phases during calibration period.
-            if self.include_calibration and cur_rel_phase != {}:
-                for i in range(len(self.paths)):
-                    (src, dst) = self.paths[i]
-                    phase_ab = cur_rel_phase[(src, dst)]
-                    phase_ba = cur_rel_phase[(src, dst)]
-                    abs_phase_ab = self._cur_abs_phase[(src, dst)]
-                    self.toggle_graph_buffer[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, 0)))
-
-        # If not calibrating, calculate pairwise velocities.
-        else:
-            all_v_rel = []
+    def _graph_medians(self):
+        if len(self.general_data[0]) >= self.median_window_size:
             for i in range(len(self.paths)):
-                # TODO: scale distances properly for duct
-                d = 0.1875
-                if not self.is_duct:
-                    d = 0.06
-                (src, dst) = self.paths[i]
-                phase_ab = cur_rel_phase[(src, dst)]
-                phase_ba = cur_rel_phase[(dst, src)]
-                abs_phase_ab = self._cur_abs_phase[(src, dst)]
-                tof_ab = phase_ab / (360 * 180000)  # khz?
-                tof_ba = phase_ba / (360 * 180000)
+                y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
+                x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
+                self.general_graph_buffer_med[i].append((x_med, y_med))
 
-                v_ab = d / (d / 343 + tof_ab)
-                v_ba = d / (d / 343 + tof_ba)
-                v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
-                if self.is_duct:
-                    # v_rel = -v_rel  # sign is flipped for four path for other anemometer
-                    v_ab = d / (d / 344 - tof_ab)
-                    v_ba = d / (d / 344 - tof_ba)
-                    avg = (v_ab + v_ba) / 2
-                    temp = avg * avg / 400 - 273.15
-                    # print(temp)
-                    self.general_graph_buffer[i].append((timestamp, temp))
-                    self.general_data[i].append((timestamp, temp))
+                y_med = np.median(
+                    [x[1][3] for x in self.relative_data[i][-self.median_window_size:]])  # Median relative velocity
+                x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
+                self.toggle_graph_buffer_med[i].append((x_med, y_med))
 
-                self.toggle_graph_buffer[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
-                self.relative_data[i].append((timestamp, (phase_ab, phase_ba, abs_phase_ab, v_rel)))
-                all_v_rel.append(v_rel)
+    def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
+        self.is_calibrating = False
+        calibrated_phases = {}
+        calibrated_indices = {}
+        calibrated_temp = 0
 
-            # Added by Yannan
-            self.velocity_outlier_filter(all_v_rel, cur_rel_phase)
-            # End added by Yannan
+        if calibration_phases is not None:
+            for (src, dst), phase_list in calibration_phases.items():
+                # make the phase list continuous. Ex: 170, -150, -130 -> 170, 210, 230
+                for i in range(1, len(phase_list)):
+                    d = closest_rotation(phase_list[i - 1], phase_list[i])
+                    phase_list[i] = phase_list[i - 1] + d
 
-            # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
-            if not self.is_duct:
-                sin30 = np.sin(np.pi / 6)
-                sin60 = np.sin(np.pi / 3)
-                vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
-                vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
-                vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-                #vx_weight = [0, sin60, 0, 0, 0, -sin60]
-                #vy_weight = [0, sin30, 1, 0, 0, sin30]
-                #vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-                tnx = 5 # 6 if 15degree coordinate system
-                tny = 5 # 6 if 15degree coordinate system
-                tnz = [] 
-                if ( 0 > abs(all_v_rel[1]) / all_v_rel[2] > - 0.5 and 0 > abs(all_v_rel[1])/all_v_rel[5] > -0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-                    tnz = [0,3]
-                if (0>abs(all_v_rel[2]) / all_v_rel[1] > -0.5 and 0 < abs(all_v_rel[2]) /all_v_rel[5] < 0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.85, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-                    tnz = [0,4]
-                if (0<abs(all_v_rel[5])/ all_v_rel[1] < 0.5 and 0<abs(all_v_rel[5])/all_v_rel[2] < 0.5): 
-                    vx_weight = [0, sin60*0.85, 0, 0, 0 , -sin60*0.85]
-                    vy_weight = [0, sin30*0.85,1*0.8, 0, 0, sin30*0.85]
-                    tnx = 2
-                    tny = 3
-                    tnz = [3,4]
-            #     
-                if ( 0 < abs(all_v_rel[0] / all_v_rel[3]) <  0.5 and 0 < abs(all_v_rel[0]/all_v_rel[4]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
-                if ( 0 < abs(all_v_rel[3] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[3]/all_v_rel[4]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30 *1.1, 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
-                if ( 0 < abs(all_v_rel[4] / all_v_rel[0]) <  0.5 and 0 < abs(all_v_rel[4]/all_v_rel[0]) < 0.5): 
-                    vx_weight = [sin30 * sin30*1.1, 0, 0, sin30*1.1, -sin30*sin30*1.1 , 0]
-                    vy_weight = [sin60 * sin30*1.1, 0,0, 0, sin60*sin30*1.1, 0]
-                    tnx = 3
-                    tny = 2
-                vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx				
-                vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / tny
-                vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
-                if (len(tnz)>1): 
-                    vp = np.sqrt(vx * vx + vy * vy) 
-                    #vz = (all_v_rel[tnz[0]]/vz_weight[tnz[0]]+all_v_rel[tnz[1]]/vz_weight[tnz[1]])/2 
-                #vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
-                #vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / 5
-                #vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
-                m = np.sqrt(vx * vx + vy * vy + vz * vz)
-                avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
-                    self.past_5_velocity_magnitudes)
-                theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
+                print("I am ", self.anemometer_id, " with path ", (src, dst), ", phases: ", phase_list)
+                calibrated_phases[(src, dst)] = mean_within_sd(phase_list, 2)
 
+        if calibration_indices is not None:
+            for (src, dst), index_list in calibration_indices.items():
+                index_list = [i for i in index_list if i >= 0]  # ignore all invalid indices
+                index_mode = 0
+                if len(index_list) > 0:
+                    index_mode = max(set(index_list), key=index_list.count)
+                calibrated_indices[(src, dst)] = index_mode
+                print(self.anemometer_id, "index[", (src, dst), "] = ", index_list, ", mode =", index_mode)
 
-                # modify m for phi --> 
-                # keep track of past 10 vx, vy, vz
-                # average of past 10 vx, average of past 10 vy, average of past 10 vz, and then calculate 
-                # a temporary m for phi with this value. 
-                # do only when sqrt(vx^2 + vy^2) < 0.5
-                # for visualization, to cancel out noise and approach 0
-                # Begin added by Yannan
-                if len(self.past_vx) < 10:
-                    self.past_vx.append(vx)
-                    self.past_vy.append(vy)
-                    self.past_vz.append(vz)
-                else:
-                    self.past_vx = self.past_vx[1:] + [vx]
-                    self.past_vy = self.past_vy[1:] + [vy]
-                    self.past_vz = self.past_vz[1:] + [vz]
+        if calibration_temperatures is not None:
+            calibrated_temp = mean_within_sd(calibration_temperatures, 2)
 
+        return calibrated_phases, calibrated_indices, calibrated_temp
 
-                if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
-                    temp_vx = mean(self.past_vx)
-                    temp_vy = mean(self.past_vy)
-                    temp_vz = mean(self.past_vz)
-                    m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-
-                if len(self.past_vx) < 10:
-                    phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
-                else:                    
-                    if abs(vz) < 0.5 and np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5:
-                        temp_vx = mean(self.past_vx)
-                        temp_vy = mean(self.past_vy)
-                        temp_vz = mean(self.past_vz)
-                        temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-                        phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
-                    elif np.sqrt(pow(vx, 2) + pow(vy, 2)) < 0.5: 
-                        temp_vx = mean(self.past_vx)
-                        temp_vy = mean(self.past_vy)
-                        temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(vz, 2))
-                        phi = np.arcsin(vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
-                    elif abs(vz) < 0.5:
-                        temp_vz = mean(self.past_vz)
-                        temp_m = np.sqrt(pow(vx, 2) + pow(vy, 2) + pow(temp_vz, 2))
-                        phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
-                    else:
-                    # End added by Yannan
-                        #original
-                        phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
-
-                self.general_graph_buffer[0].append((timestamp, vx))
-                self.general_graph_buffer[1].append((timestamp, vy))
-                self.general_graph_buffer[2].append((timestamp, vz))
-                self.general_graph_buffer[3].append((timestamp, m))
-                self.general_graph_buffer[4].append((timestamp, theta))
-                self.general_graph_buffer[5].append((timestamp, phi))
-
-                self.general_data[0].append((timestamp, vx))
-                self.general_data[1].append((timestamp, vy))
-                self.general_data[2].append((timestamp, vz))
-                self.general_data[3].append((timestamp, m))
-                self.general_data[4].append((timestamp, theta))
-                self.general_data[5].append((timestamp, phi))
-                self.past_5_velocity_magnitudes.append(m)
-
-            if len(self.general_data[0]) >= self.median_window_size:
-                for i in range(len(self.paths)):
-                    y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
-                    x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
-                    self.general_graph_buffer_med[i].append((x_med, y_med))
-
-                    y_med = np.median([x[1][3] for x in self.relative_data[i][-self.median_window_size:]]) # Median relative velocity
-                    x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
-                    self.toggle_graph_buffer_med[i].append((x_med, y_med))
-
-        # Rotate over the readings to prepare for the next reading.
-        self._prev_rel_phase = cur_rel_phase
-        self._prev_abs_phase = self._cur_abs_phase
-        self._cur_abs_phase = next_abs_phase
     # Begin added by Yannan
     # place check after for loop, all values have been appended
     # self.toggle_graph_buffer[i].appends v_rel as well --> toggle canvas issue, second priority?
     # otherwise, also need to pass this in and edit somehow (with temporary list, then extend + append possibly)
-    def velocity_outlier_filter(self, all_v_rel, cur_rel_phase):
+    def _velocity_outlier_filter(self, all_v_rel, cur_rel_phase):
         outlier_index = -1
         for i in range(len(all_v_rel)):
             # Take mean of all values except value in question (not averaging whole thing?)
-            rest_of_lst = all_v_rel[0:i] + all_v_rel[i+1:]
+            rest_of_lst = all_v_rel[0:i] + all_v_rel[i + 1:]
             avg = mean([abs(val) for val in rest_of_lst])
             condition = avg < 0.5 and abs(all_v_rel[i]) > (avg + 1)
             if condition:
                 outlier_index = i
-                continue            #assumes only one outlier
+                continue  # assumes only one outlier
         if outlier_index != -1:
             # counter for each index 
             self.past_5_counter[outlier_index] += 1
@@ -605,7 +733,8 @@ class AnemometerProcessor:
                 # change cur_rel_phase, only change for incorrect index; mean of the rest of indices
                 (src, dst) = self.paths[outlier_index]
                 (dst, src) = self.paths[outlier_index]
-                new_val = (sum(cur_rel_phase.values()) - cur_rel_phase[(src, dst)] - cur_rel_phase[(dst, src)])/(len(cur_rel_phase)-2)
+                new_val = (sum(cur_rel_phase.values()) - cur_rel_phase[(src, dst)] - cur_rel_phase[(dst, src)]) / (
+                        len(cur_rel_phase) - 2)
                 cur_rel_phase[(src, dst)] = new_val
                 cur_rel_phase[(dst, src)] = new_val
                 # all_v_rel[outlier_index] = avg
@@ -615,27 +744,60 @@ class AnemometerProcessor:
             for count in self.past_5_counter:
                 count = 0
 
-    def update_medians(self, median_window_size, is_toggle_graph, index):
-        # Todo: small bug where buffer may still hold a few medians using the old median window size. 
-        x_medians = []
-        y_medians = []
-        if is_toggle_graph:
-            if len(self.relative_data[index]) < median_window_size:
-                return ([], [])
-            for i in range(len(self.relative_data[index]) - median_window_size + 1):
-                x_medians.append(np.median([x[0] for x in self.relative_data[index][i : i + median_window_size]]))
-                y_medians.append(np.median([x[1][3] for x in self.relative_data[index][i : i + median_window_size]]))
+    def _update_directional_vel(self, vx, vy, vz):
+        if len(self.past_vx) < 10:
+            self.past_vx.append(vx)
+            self.past_vy.append(vy)
+            self.past_vz.append(vz)
         else:
-            if len(self.general_data[index]) < median_window_size:
-                return ([], [])
-            for i in range(len(self.general_data[index]) - median_window_size + 1):
-                x_medians.append(np.median([x[0] for x in self.general_data[index][i : i + median_window_size]]))
-                y_medians.append(np.median([x[1] for x in self.general_data[index][i : i + median_window_size]]))
-        return (x_medians, y_medians)
+            self.past_vx = self.past_vx[1:] + [vx]
+            self.past_vy = self.past_vy[1:] + [vy]
+            self.past_vz = self.past_vz[1:] + [vz]
+
+    def _phase_correction(self, src, dst, expected_phase_difference, absolute_phases):
+        expected_phase = self._calibrated_phase[(src, dst)] + expected_phase_difference
+        actual_phase = absolute_phases[(src, dst)]
+        phase_correction = closest_rotation(expected_phase, actual_phase)
+        # print("Path ", (src, dst), ", calibrated ", self._calibrated_phase[(src, dst)], ", expected change ",
+        #       expected_phase_difference, ", actual ", absolute_phases[(src, dst)], " correction: ", phase_correction)
+        return phase_correction
+
+
+# Returns the rotation from x to y, such that x + rotation = y
+# abs(rotation) < 180, and y is truncated to be between 0 and 360
+# ex: closest_rotation(40, -40) = -80. closest_rotation(420, 190) = 130. closest_rotation(420, -530) = 130
+def closest_rotation(x, y):
+    d = (y - x) % 360
+    if d > 180:
+        d -= 360
+    return d
+
+    # Completes calibration and returns the calibrated phase and index
+
 
 def mean(numbers):
-        return float(sum(numbers)) / max(len(numbers), 1)
-    # End added by Yannan
+    return float(sum(numbers)) / max(len(numbers), 1)
+
+
+def mean_within_sd(nums, sd_boundary):
+    m = np.mean(nums)
+    sd = np.std(nums)
+    if sd == 0:
+        return m
+    s = 0
+    count = 0
+    for num in nums:
+        if abs(num - m) / sd <= sd_boundary:
+            s += num
+            count += 1
+    if count == 0:
+        # What should we actually do in this case?
+        print("Warn: Given list is very noisy. Could not get clean average")
+        return m
+    else:
+        return s / count
+
+
 # old implementation with Readings
     # Calculate the relative phases, velocities, and other values for this reading using PHASE ONLY
     # def _process_reading_phase(self, reading):

@@ -19,7 +19,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def _process_input():
-    readings_generator = read_input(all_anemometer_ids, site_id)
+    readings_generator = read_input(all_anemometer_ids, site_id, usb_port)
     for (reading, line) in readings_generator:
         # if len(line) > 0:
         #     print("read ", line)
@@ -28,14 +28,17 @@ def _process_input():
 
 
 # Generator function that runs the data streaming script and parses the incoming data, yielding the DecodedRawInput objects. Optionally filters for certain IDs and sites.
-def read_input(anemometer_ids=None, site_filter=None):
+def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
     operating_system = platform.system()
     print("OS: ", operating_system)
     if operating_system is "Windows":
         open_args = ["./input/src.exe"]
     else:
         open_args = ["./input/src"]
+    if usb_port is not None:
+        open_args.append(usb_port)
     # open_args = ["python", "input.py"] # if you want to simulate input from test dataset
+
     if site_filter is None:
         p = Popen(open_args, stdout=PIPE)
     else:
@@ -71,33 +74,50 @@ def read_input(anemometer_ids=None, site_filter=None):
             is_duct6 = False
             is_room = not is_duct
         
-
         parsed = DecodedRawInput(anemometer_id, timestamp, site, is_duct, is_duct6, is_room)
+        success = True
+        temps = []
         for sensor in range(0, num_sensors):
             sensor_data = data['RawInput']['ChirpHeaders'][sensor]
+            if sensor_data is None:
+                print("Data is incomplete, missing sensor ", sensor, ". Skipping. Data line received:\n", line_orig)
+                success = False
+                break
+            temps.append(float(sensor_data['Temperature']))
             parsed_sensor_data = DecodedChirpHeader(sensor, sensor_data['MaxIndex'],
                                                     sensor_data['QValues'], sensor_data['IValues'])
             # print(parsed_sensor_data.id, parsed_sensor_data.max_indices, parsed_sensor_data.real, parsed_sensor_data.imaginary)
             parsed.add_chirp_header(parsed_sensor_data)
-
-        yield (parsed, line_orig)
+        if success:
+            parsed.temperature = temps[0] # all temperature fields are equal.
+            yield (parsed, line_orig)
 
     # When the subprocess terminates there might be unconsumed outputthat still needs to be processed.
     print(p.stdout.read())  # (? probably unnecessary)
 
 def read_anemometer_IDs():
     id_file = open("anemometerIDs.txt", "r")
+    duct_anemometer_ids = []
+    room_anemometer_ids = []
+    site_id = ""
+    usb_port = ""
     for line in id_file:
         words = line.split()
         if len(words) == 2:
             if words[0] == "site:":
                 site_id = words[1]    # Assumes siteID has no spaces
+                if site_id == "None":
+                    usb_port = None
+            elif words[0] == "USBport:":
+                usb_port = words[1]
+                if usb_port == "None":
+                    usb_port = None
             elif words[1] == "duct":
                 duct_anemometer_ids.append(words[0])
             elif words[1] == "room":
                 room_anemometer_ids.append(words[0])
 
-    return (duct_anemometer_ids, room_anemometer_ids, site_id)
+    return (duct_anemometer_ids, room_anemometer_ids, site_id, usb_port)
     
 
 
@@ -124,7 +144,8 @@ def _create_processors_and_windows():
 if __name__ == '__main__':
     alldata = []  # list of all input data lines as is
     anemometer_processors = {}  # {anemometer_id : AnemometerProcessor}
-    site_id = ""
+    site_id = None
+    usb_port = None
     duct_anemometer_ids = []
     room_anemometer_ids = []
     all_anemometer_ids = []
@@ -137,7 +158,7 @@ if __name__ == '__main__':
     mainWindow.setWindowTitle("Main hub")
 
     # Set up anemometer stream processors
-    duct_anemometer_ids, room_anemometer_ids, site_id = read_anemometer_IDs()
+    duct_anemometer_ids, room_anemometer_ids, site_id, usb_port = read_anemometer_IDs()
     all_anemometer_ids = duct_anemometer_ids + room_anemometer_ids
     print("Tracking duct anemometers: ", duct_anemometer_ids)
     print("Tracking room anemometers: ", room_anemometer_ids)

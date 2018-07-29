@@ -7,5 +7,5 @@ with open("newdata2.txt") as f:
         print line,
         sys.stdout.flush()
         i = 0
-        for j in range(6000000):
+        for j in range(1000000):
             i+=1
