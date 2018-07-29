@@ -8,7 +8,6 @@ from PyQt5 import QtCore, QtWidgets
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.animation as animation
-import numpy as np
 import time
 import os
 
@@ -53,9 +52,16 @@ class ApplicationWindow(QtWidgets.QDialog):
                                  QtCore.Qt.CTRL + QtCore.Qt.Key_Q)
         self.main_widget = QtWidgets.QWidget(self)
 
-        # Create layout
-        # l = QtWidgets.QVBoxLayout(self.main_widget)
-        l = QtWidgets.QGridLayout(self)
+        # Set up tabs
+        self.tabs = QtWidgets.QTabWidget()
+        self.tab1 = QtWidgets.QWidget()
+        self.tab2 = QtWidgets.QWidget()
+
+        self.tabs.addTab(self.tab1, "Main")
+        self.tabs.addTab(self.tab2, "Diagnostic")
+
+        # Create diagnostic tab layout
+        l = QtWidgets.QGridLayout(self.tab2)
         
         # Add buttons  
         self.debug_toggle_button = QtWidgets.QPushButton('TOGGLE DEBUG', self)
@@ -123,6 +129,8 @@ class ApplicationWindow(QtWidgets.QDialog):
             l.addWidget(theta, 3, 2)
             l.addWidget(phi, 3, 3)
 
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self.tabs)
         self.main_widget.setFocus()
         # self.setCentralWidget(self.main_widget)
         # if self.anem_processor_owner.is_calibrating:
@@ -148,7 +156,7 @@ class ApplicationWindow(QtWidgets.QDialog):
             new_median_window_size = int(self.median_window_textbox.text())
         except ValueError:
             print("Error: Cannot use a non-integer median window. You entered ", self.median_window_textbox.text())
-            return;
+            return
         if self.anem_processor_owner.median_window_size != new_median_window_size:
             self.anem_processor_owner.median_window_size = new_median_window_size
             for graph in self.toggle_graphs:
