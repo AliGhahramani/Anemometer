@@ -37,7 +37,7 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
         open_args = ["./input/src"]
     if usb_port is not None:
         open_args.append(usb_port)
-    open_args = ["python", "input.py"] # if you want to simulate input from test dataset
+    # open_args = ["python", "input.py"]  # if you want to simulate input from test dataset
 
     if site_filter is None:
         p = Popen(open_args, stdout=PIPE)

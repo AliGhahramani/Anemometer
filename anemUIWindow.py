@@ -8,7 +8,9 @@ from PyQt5 import QtCore, QtWidgets
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.animation as animation
+import matplotlib.ticker as ticker
 import time, os, threading
+import numpy as np
 
 GRAPH_MAX_X_WINDOW = 200
 
@@ -235,7 +237,7 @@ class ApplicationWindow(QtWidgets.QDialog):
     def _update_main_tab_header(self):
         while True:
             speed = self.anem_processor_owner.get_speed()
-            temp = self.anem_processor_owner.get_temp()
+            temp = self.anem_processor_owner.get_temp_measured()
             radial = self.anem_processor_owner.get_radial()
             vertical = self.anem_processor_owner.get_vertical()
             window = self.anem_processor_owner.get_averaging_window()
@@ -267,22 +269,21 @@ class StripGraphs(FigureCanvas):
         self.num_graphs = 3 if self.include_radial else 2
 
         self.title = "title placeholder"
+        self.scale_y_axes = [True, True]
         self.axes = []
         self.axes.append(self.fig.add_subplot(self.num_graphs, 1, 1))
         self.axes.append(self.fig.add_subplot(self.num_graphs, 1, 2))
         self.axes[0].set_ylabel("velocity (m/s)")
         self.axes[1].set_ylabel("temp (°C)")
-        self.axes[0].grid(color='gray', linestyle='-', linewidth=0.5)
-        self.axes[1].grid(color='gray', linestyle='-', linewidth=0.5)
         if self.include_radial:
             self.axes.append(self.fig.add_subplot(self.num_graphs, 1, 3))
             self.axes[2].set_ylabel("azimuth (°)")
-            self.axes[2].grid(color='gray', linestyle='-', linewidth=0.5)
-        self.axes[-1].set_xlabel("time since start (s)")
-        self.scale_y_axes = [True, True]
-        if self.include_radial:
             self.scale_y_axes.append(False)
-
+        for axis in self.axes:
+            axis.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+            axis.grid(color='gray', linewidth=0.5, which='major', linestyle='-')
+            axis.grid(color='lightgray', linewidth=0.5, which='minor', linestyle='--')
+        self.axes[-1].set_xlabel("time since start (s)")
         self.fig.set_tight_layout(True)
 
         self.xdata = [[] for _ in range(self.num_graphs)]
@@ -296,9 +297,6 @@ class StripGraphs(FigureCanvas):
         self.ln = [None for _ in range(self.num_graphs)]
         self.ln_med = [None for _ in range(self.num_graphs)]
 
-        # self.update_ylim = (yrange is None)  # If a custom y range is set, don't update the y range on new data
-        # self.yrange = yrange
-        # self.compute_initial_figure(yrange, yticks)
         self.compute_initial_figure()
 
         FigureCanvas.__init__(self, self.fig)
@@ -315,11 +313,24 @@ class StripGraphs(FigureCanvas):
 
     def compute_initial_figure(self):
         for i in range(self.num_graphs):
-            ln, = self.axes[i].plot(self.xdata[i], self.ydata[i], 'o', markersize=1)
-            ln_med, = self.axes[i].plot(self.xdata[i], self.ydata[i], 'ro', markersize=1)
-            self.ln[i] = ln
-            self.ln_med[i] = ln_med
-
+            if not self.is_duct:
+                # 2 lines per graph: one for raw data, one for medians
+                ln, = self.axes[i].plot(self.xdata[i], self.ydata[i], '.', markersize=0.5, color='gray')
+                ln_med, = self.axes[i].plot(self.xdata[i], self.ydata_med[i], 'ro', markersize=1)
+                self.ln[i] = ln
+                self.ln_med[i] = ln_med
+            else:
+                # 8 lines per graph: 4 for raw data, 4 for medians
+                colors=['red', 'green', 'cyan', 'blue']
+                self.ln[i] = []
+                self.ln_med[i] = []
+                self.ydata[i] = [[] for _ in range(4)]
+                self.ydata_med[i] = [[] for _ in range(4)]
+                for j in range(4):
+                    ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
+                    ln_med, = self.axes[i].plot(self.xdata[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
+                    self.ln[i].append(ln)
+                    self.ln_med[i].append(ln_med)
         if self.include_radial:
             self.axes[2].set_ylim(-180, 180)
             self.axes[2].set_yticks([-180, -90, 0, 90, 180])
@@ -339,25 +350,34 @@ class StripGraphs(FigureCanvas):
         # self.xdata_med, self.ydata_med = self.anem_processor_owner.update_medians(median_window_size, False, self.inbuf_index)
 
     def up(self, f):
-        # Take in input from buffer
         for g in range(self.num_graphs):
+            # Take in input from buffer
             x = 0
             buf_len = len(self.anem_processor_owner.strip_graph_buffer[g])
             med_buf_len = len(self.anem_processor_owner.strip_graph_buffer_med[g])
             for i in range(buf_len):
                 (x, y) = self.anem_processor_owner.strip_graph_buffer[g][i]
                 self.xdata[g].append(x)
-                self.ydata[g].append(y)
-                if y > self.ymax[g]:
-                    self.ymax[g] = y
-                    self.ymax_index[g] = (x, len(self.xdata[g]))
-                if y < self.ymin[g]:
-                    self.ymin[g] = y
-                    self.ymin_index[g] = (x, len(self.xdata[g]))
+                if self.is_duct:
+                    for j in range(4):
+                        self.ydata[g][j].append(y[j])
+                else:
+                    self.ydata[g].append(y)
             for i in range(med_buf_len):
                 (x_med, y_med) = self.anem_processor_owner.strip_graph_buffer_med[g][i]
                 self.xdata_med[g].append(x_med)
-                self.ydata_med[g].append(y_med)
+                if self.is_duct:
+                    for j in range(4):
+                        self.ydata_med[g][j].append(y_med[j])
+                else:
+                    self.ydata_med[g].append(y_med)
+
+                if np.max(y_med) > self.ymax[g]:
+                    self.ymax[g] = np.max(y_med)
+                    self.ymax_index[g] = (x_med, len(self.xdata[g]))
+                if np.min(y_med) < self.ymin[g]:
+                    self.ymin[g] = np.min(y_med)
+                    self.ymin_index[g] = (x_med, len(self.xdata[g]))
 
             # Clear processed elements from buffer
             self.anem_processor_owner.strip_graph_buffer[g] = self.anem_processor_owner.strip_graph_buffer[g][buf_len:]
@@ -367,21 +387,31 @@ class StripGraphs(FigureCanvas):
             try:
                 # Rescale y axis if min or max y value has gone out of frame. again, _index holds tuples (time, index)
                 if x - GRAPH_MAX_X_WINDOW > self.ymin_index[g][0]:
-                    search_start = self.ymin_index[g][1] + 1
-                    self.ymin[g] = self.ydata[g][search_start]
-                    self.ymin_index[g] = (self.xdata[g][search_start], search_start)
-                    for i in range(search_start, len(self.ydata[g])):
-                        if self.ydata[g][i] < self.ymin[g]:
-                            self.ymin[g] = self.ydata[g][i]
-                            self.ymin_index[g] = (self.xdata[g][i], i)
+                    if self.is_duct:
+                        val = self.ymax[g]
+                        index = 0
+                        for i in range(4):
+                            v, ind = find_min_max_index(self.ydata_med[g][i], self.ymin_index[g][1] + 1, True)
+                            if v < val:
+                                val = v
+                                index = ind
+                    else:
+                        val, index = find_min_max_index(self.ydata_med[g], self.ymin_index[g][1] + 1, True)
+                    self.ymin[g] = val
+                    self.ymin_index[g] = (self.xdata[g][index], index)
                 if x - GRAPH_MAX_X_WINDOW > self.ymax_index[g][0]:
-                    search_start = self.ymax_index[g][1] + 1
-                    self.ymax[g] = self.ydata[g][search_start]
-                    self.ymax_index[g] = (self.xdata[g][search_start], search_start)
-                    for i in range(search_start, len(self.ydata[g])):
-                        if self.ydata[g][i] > self.ymax[g]:
-                            self.ymax[g] = self.ydata[g][i]
-                            self.ymax_index[g] = (self.xdata[g][i], i)
+                    if self.is_duct:
+                        val = self.ymin[g]
+                        index = 0
+                        for i in range(4):
+                            v, ind = find_min_max_index(self.ydata_med[g][i], self.ymax_index[g][1] + 1, True)
+                            if v > val:
+                                val = v
+                                index = ind
+                    else:
+                        val, index = find_min_max_index(self.ydata_med[g], self.ymax_index[g][1] + 1, False)
+                    self.ymax[g] = val
+                    self.ymax_index[g] = (self.xdata[g][index], index)
             except IndexError:
                 pass
 
@@ -395,8 +425,13 @@ class StripGraphs(FigureCanvas):
                 self.draw()
 
             # Set data for lines
-            self.ln[g].set_data(self.xdata[g], self.ydata[g])
-            self.ln_med[g].set_data(self.xdata_med[g], self.ydata_med[g])
+            if self.is_duct:
+                for i in range(4):
+                    self.ln[g][i].set_data(self.xdata[g], self.ydata[g][i])
+                    self.ln_med[g][i].set_data(self.xdata_med[g], self.ydata_med[g][i])
+            else:
+                self.ln[g].set_data(self.xdata[g], self.ydata[g])
+                self.ln_med[g].set_data(self.xdata_med[g], self.ydata_med[g])
 
         return self.ln
 
@@ -744,3 +779,13 @@ def strformat_double(num):
         return "{:.1f}".format(num)
     else:
         return "{:.2f}".format(num)
+
+
+def find_min_max_index(data, start_index, find_min):
+    search_data = data[start_index:]
+    if find_min:
+        val = min(search_data)
+    else:
+        val = max(search_data)
+    index = search_data.index(val) + start_index
+    return val, index
