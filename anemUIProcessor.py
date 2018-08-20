@@ -470,23 +470,34 @@ class AnemometerProcessor:
     def dump_raw_data(self):
         self.data_dump_func()
 
-    def update_medians(self, median_window_size, is_toggle_graph, index):
+    def update_medians(self, median_window_size, graph_type, index):
         # Todo: small bug where buffer may still hold a few medians using the old median window size.
         x_medians = []
         y_medians = []
-        if is_toggle_graph:
+        if graph_type is "toggle":
             if len(self.relative_data[index]) < median_window_size:
-                return ([], [])
+                return [], []
             for i in range(len(self.relative_data[index]) - median_window_size + 1):
                 x_medians.append(np.median([x[0] for x in self.relative_data[index][i: i + median_window_size]]))
                 y_medians.append(np.median([x[1][3] for x in self.relative_data[index][i: i + median_window_size]]))
-        else:
+        elif graph_type is "general":
             if len(self.general_data[index]) < median_window_size:
-                return ([], [])
+                return [], []
             for i in range(len(self.general_data[index]) - median_window_size + 1):
                 x_medians.append(np.median([x[0] for x in self.general_data[index][i: i + median_window_size]]))
                 y_medians.append(np.median([x[1] for x in self.general_data[index][i: i + median_window_size]]))
-        return (x_medians, y_medians)
+        elif graph_type is "strip":
+            if len(self.strip_data[index]) < median_window_size:
+                return [], []
+            for i in range(len(self.strip_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.strip_data[index][i: i + median_window_size]]))
+                if not self.is_duct:
+                    y_medians.append(np.median([x[1] for x in self.strip_data[index][i: i + median_window_size]]))
+                else:
+                    y_medians = [[] for _ in range(len(self.paths))]
+                    for path in range(len(self.paths)):
+                        y_medians[path].append(np.median([x[1][path] for x in self.strip_data[index][i: i + median_window_size]]))
+        return x_medians, y_medians
 
     def temp_to_TOF(self, temperature):
         speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
@@ -572,7 +583,7 @@ class AnemometerProcessor:
         return vx, vy, vz
 
     def directional_velocities_to_spherical_coordinates(self, vx, vy, vz):
-        m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        # theta calculation
         avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
             self.past_5_velocity_magnitudes)
         theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
@@ -583,11 +594,21 @@ class AnemometerProcessor:
         # do only when sqrt(vx^2 + vy^2) < 0.5
         # for visualization, to cancel out noise and approach 0
         # Begin added by Yannan
-        if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
-            temp_vx = mean(self.past_vx)
-            temp_vy = mean(self.past_vy)
-            temp_vz = mean(self.past_vz)
-            m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        # m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
+        #     temp_vx = mean(self.past_vx)
+        #     temp_vy = mean(self.past_vy)
+        #     temp_vz = mean(self.past_vz)
+        #     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        # New m calculation
+        temp_vx = self._median_in_window(self.past_vx)
+        temp_vy = self._median_in_window(self.past_vy)
+        temp_vz = self._median_in_window(self.past_vz)
+        m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        # phi calculation
         if len(self.past_vx) < 10:
             phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         else:
@@ -793,6 +814,13 @@ class AnemometerProcessor:
                 x_med = np.median([x[0] for x in self.strip_data[2][-self.median_window_size:]])
                 self.strip_graph_buffer_med[2].append((x_med, y_med))
                 self.radial_med = y_med
+
+    def _median_in_window(self, data):
+        if len(data) == 0:
+            print("Warn: taking median of empty list. Returning 0")
+            return 0
+        return np.median(data[-self.median_window_size:])
+
 
     def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
         self.is_calibrating = False

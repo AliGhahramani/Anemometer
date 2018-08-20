@@ -58,6 +58,22 @@ class ApplicationWindow(QtWidgets.QDialog):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.tabs)
+
+        # Set up settings bar
+        self.median_window_textbox = QtWidgets.QLineEdit(self)
+        self.median_window_textbox.setText('5')  # default median window size is 5
+        self.median_window_textbox.setMaxLength(2)
+        self.median_window_label = QtWidgets.QLabel('Median window size', self)
+        self.median_window_button = QtWidgets.QPushButton('Set', self)
+        self.median_window_button.clicked.connect(self.on_set_median_window_click)
+
+        settings_layout = QtWidgets.QHBoxLayout(self)
+        settings_layout.addWidget(self.median_window_label)
+        settings_layout.addWidget(self.median_window_textbox)
+        settings_layout.addWidget(self.median_window_button)
+        settings_layout.addStretch(1)
+        layout.addLayout(settings_layout)
+
         self.main_widget.setFocus()
         # self.setCentralWidget(self.main_widget)
         # if self.anem_processor_owner.is_calibrating:
@@ -130,18 +146,10 @@ class ApplicationWindow(QtWidgets.QDialog):
         self.dump_graph_button.setToolTip('save all data shown on graph to anemometer_graph_data_' +
                                           str(self.anemometer_id) + '.tsv')
         self.dump_graph_button.clicked.connect(self.on_dump_graph_data_click)
-        self.median_window_textbox = QtWidgets.QLineEdit(self)
-        self.median_window_textbox.setText('5')  # default median window size is 5
-        self.median_window_textbox.setMaxLength(4)
-        self.median_window_label = QtWidgets.QLabel('Median window size', self)
-        self.median_window_button = QtWidgets.QPushButton('SET', self)
-        self.median_window_button.clicked.connect(self.on_set_median_window_click)
         l2.addWidget(self.debug_toggle_button, 0, 0)
         l2.addWidget(self.dump_data_button, 1, 0)
         l2.addWidget(self.dump_graph_button, 2, 0)
-        l2.addWidget(self.median_window_label, 4, 0)
-        l2.addWidget(self.median_window_textbox, 5, 0)
-        l2.addWidget(self.median_window_button, 6, 0)
+
         # Add graphs
         # TODO: Probably do this with subplots instead of multiple plots..
         self.toggle_graphs = []
@@ -206,6 +214,7 @@ class ApplicationWindow(QtWidgets.QDialog):
                 graph.update_median(new_median_window_size)
             for graph in self.general_graphs:
                 graph.update_median(new_median_window_size)
+            self.strip_graphs.update_median(new_median_window_size)
 
     def on_dump_graph_data_click(self):
         filename = 'anemometer_graph_data_' + str(self.anemometer_id) + '.tsv'
@@ -316,7 +325,7 @@ class StripGraphs(FigureCanvas):
             if not self.is_duct:
                 # 2 lines per graph: one for raw data, one for medians
                 ln, = self.axes[i].plot(self.xdata[i], self.ydata[i], '.', markersize=0.5, color='gray')
-                ln_med, = self.axes[i].plot(self.xdata[i], self.ydata_med[i], 'ro', markersize=1)
+                ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i], 'ro', markersize=1)
                 self.ln[i] = ln
                 self.ln_med[i] = ln_med
             else:
@@ -328,7 +337,7 @@ class StripGraphs(FigureCanvas):
                 self.ydata_med[i] = [[] for _ in range(4)]
                 for j in range(4):
                     ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
-                    ln_med, = self.axes[i].plot(self.xdata[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
+                    ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
                     self.ln[i].append(ln)
                     self.ln_med[i].append(ln_med)
         if self.include_radial:
@@ -346,8 +355,9 @@ class StripGraphs(FigureCanvas):
             fig=self.fig, func=self.up, interval=10)
 
     def update_median(self, median_window_size):
-        print("not implemented")
-        # self.xdata_med, self.ydata_med = self.anem_processor_owner.update_medians(median_window_size, False, self.inbuf_index)
+        for graph in range(self.num_graphs):
+            self.xdata_med[graph], self.ydata_med[graph] = self.anem_processor_owner.update_medians(median_window_size,
+                                                                                                    "strip", graph)
 
     def up(self, f):
         for g in range(self.num_graphs):
@@ -507,7 +517,7 @@ class ToggleableGraph(FigureCanvas):
             self.axes.set_ylabel("velocity (m/s)")
 
     def update_median(self, median_window_size):
-        self.xdata_vel_median, self.ydata_vel_median = self.anem_processor_owner.update_medians(median_window_size, True, self.inbuf_index)
+        self.xdata_vel_median, self.ydata_vel_median = self.anem_processor_owner.update_medians(median_window_size, "toggle", self.inbuf_index)
 
     def up(self, f):
         if len(self.anem_processor_owner.toggle_graph_buffer[self.inbuf_index]) == 0:
@@ -700,7 +710,7 @@ class GeneralGraph(FigureCanvas):
             fig=self.fig, func=self.up, interval=10)
 
     def update_median(self, median_window_size):
-        self.xdata_med, self.ydata_med = self.anem_processor_owner.update_medians(median_window_size, False, self.inbuf_index)
+        self.xdata_med, self.ydata_med = self.anem_processor_owner.update_medians(median_window_size, "general", self.inbuf_index)
 
     def up(self, f):
         # if not self.anem_processor_owner.is_calibrating:
