@@ -20,6 +20,7 @@ class AnemometerProcessor:
         self.start_time = time.time()
         self.paths = []
         self.median_window_size = 5
+        self.median_window_size_extended = 50
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
@@ -608,6 +609,16 @@ class AnemometerProcessor:
         temp_vz = self._median_in_window(self.past_vz)
         m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
 
+        # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
+        if m < 0.5:
+            temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
+            temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
+            temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
+            temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+            if temp_m < m:
+                print("lower! ", temp_m, m)
+            m = min(m, temp_m)
+
         # phi calculation
         if len(self.past_vx) < 10:
             phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
@@ -815,11 +826,13 @@ class AnemometerProcessor:
                 self.strip_graph_buffer_med[2].append((x_med, y_med))
                 self.radial_med = y_med
 
-    def _median_in_window(self, data):
+    def _median_in_window(self, data, window_size=None):
+        if window_size is None:
+            window_size = self.median_window_size
         if len(data) == 0:
             print("Warn: taking median of empty list. Returning 0")
             return 0
-        return np.median(data[-self.median_window_size:])
+        return np.median(data[-window_size:])
 
 
     def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
