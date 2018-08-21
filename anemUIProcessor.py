@@ -8,18 +8,20 @@ from anemUIWindow import *
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
     def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period=10,
-                 include_calibration=False):
+                 include_calibration=False, use_room_min=True):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
         self.data_dump_func = data_dump_func
         self.calibration_period = calibration_period
         self.include_calibration = include_calibration
+        self.use_room_min = use_room_min
         self.algorithm = 1  # 0: phase only. 1: Temperature guided\
         self.is_calibrating = True
         self.aw = None
         self.start_time = time.time()
         self.paths = []
         self.median_window_size = 5
+        self.median_window_size_extended = 50
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
@@ -28,39 +30,37 @@ class AnemometerProcessor:
             self.paths = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
             self.past_5_velocity_magnitudes = deque(maxlen=5)
         l = len(self.paths)
+        num_strip_graphs = 2 if is_duct else 3
 
         # Graph buffers, containing data to be added to the graphs
-        self.toggle_graph_buffer = [[] for i in range(0,
-                                                      l)]  # list of (# paths) lists. Each list holds a tuple in form (timestamp, (rel_a_b, rel_b_a, abs_a_b, rel_vel)) that has yet to be graphed on a toggle-able graph
-        self.general_graph_buffer = [[] for i in range(0,
-                                                       l)]  # Same behavior as toggle_graph_buffer, different contents (duct: (timestamp, temp) per path, room: timestamp, and one of vx, vy, vz, m, theta, phi)
-        self.toggle_graph_buffer_med = [[] for i in range(0, l)]  # medians
-        self.general_graph_buffer_med = [[] for i in range(0, l)]  # medians
+        self.toggle_graph_buffer = [[] for _ in range(0, l)]  # list of (# paths) lists. Each list holds a tuple in form (timestamp, (rel_a_b, rel_b_a, abs_a_b, rel_vel)) that has yet to be graphed on a toggle-able graph
+        self.general_graph_buffer = [[] for _ in range(0, l)]  # Same behavior as toggle_graph_buffer, different contents (duct: (timestamp, temp) per path, room: timestamp, and one of vx, vy, vz, m, theta, phi)
+        self.strip_graph_buffer = [[] for _ in range(0, num_strip_graphs)]  # Same behavior as toggle_graph_buffer, duct: timestamp, and one of speed or temp. room: timestamp, and one of speed, azimuth, or temp
+        self.toggle_graph_buffer_med = [[] for _ in range(0, l)]  # medians
+        self.general_graph_buffer_med = [[] for _ in range(0, l)]  # medians
+        self.strip_graph_buffer_med = [[] for _ in range(0, num_strip_graphs)]
 
         # Data history
-        self.relative_data = [[] for i in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
-        self.general_data = [[] for i in range(0, l)]  # Same tuple data as general_graph_buffer, but for all data
+        self.relative_data = [[] for _ in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
+        self.general_data = [[] for _ in range(0, l)]  # Same tuple data as general_graph_buffer, but for all data
+        self.strip_data = [[] for _ in range(0, num_strip_graphs)]
+        self.path_vels = [deque(maxlen=self.median_window_size_extended) for _ in range(0, l)]
+        self.temp_measured = 0  # most recent measured temp
+        self.temp_calculated = 0           # most recent calculated temp
+        self.speed = 0          # most recent speed
+        self.radial = None      # most recent radial angle. Invalid for room
+        self.vertical = None    # most recent vertical angle. Invalid for room
+        self.temp_med = 0
+        self.speed_med = 0
+        self.radial_med = None
 
         if self.algorithm is 0:
             self._prev_rel_phase = {}  # {(src, dst) : number}
             self._prev_abs_phase = {}  # {(src, dst) : number}
             self._cur_abs_phase = {}  # {(src, dst) : number}
-            self._calibration_phases = defaultdict(
-                list)  # {(src, dst) : []}, used to hold rel phases during calibration period
-            self._calibration_indices = defaultdict(
-                list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
-            self._calibrated_index = {}  # {src, dst): index}
         else:
             self._prev_abs_phase = {}
-
-            self._calibration_indices = defaultdict(list)
-            self._calibration_phases = defaultdict(list)
-            self._calibration_temperatures = []
-
-            self._calibrated_index = {}
-            self._calibrated_phase = {}
-            self._calibrated_temperature = 0
-            self._calibrated_TOF = 0
+        self.start_calibration()
 
         # Added by Yannan
         self.past_5_counter = [0, 0, 0, 0, 0, 0]
@@ -84,6 +84,7 @@ class AnemometerProcessor:
         print(self.anemometer_id, "processing reading")
         num_sensors = reading.num_sensors
         timestamp = time.time() - self.start_time
+        temp = reading.get_temperature()
 
         next_abs_phase, read_index = self._get_abs_phase(reading, self._cur_abs_phase)
         cur_rel_phase = self._infer_rel_phase(next_abs_phase)
@@ -115,20 +116,30 @@ class AnemometerProcessor:
         else:
             # TODO: scale distances properly for duct
             d = 0.1875 if self.is_duct else 0.06
+            speed = 0
+            theta = None
+            phi = None
             all_v_rel = []
+            all_temps = []
 
             for i in range(len(self.paths)):
                 (src, dst) = self.paths[i]
                 phase_ab = cur_rel_phase[(src, dst)]
                 phase_ba = cur_rel_phase[(dst, src)]
                 abs_phase_ab = self._cur_abs_phase[(src, dst)]
-                velocity, temp = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
-                temp = reading.temperature
+                velocity, temp_calculated, success = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
+                if not success:
+                    self._prev_rel_phase = cur_rel_phase
+                    self._prev_abs_phase = self._cur_abs_phase
+                    self._cur_abs_phase = next_abs_phase
+                    return
+                speed = velocity
 
                 self.add_to_toggle_graph((timestamp, (phase_ab, phase_ba, abs_phase_ab, velocity)), i)
                 if self.is_duct:
-                    self.add_to_general_graph((timestamp, temp), i)
+                    self.add_to_general_graph((timestamp, temp_calculated), i)
                 all_v_rel.append(velocity)
+                all_temps.append(temp_calculated)
 
             # Added by Yannan
             self._velocity_outlier_filter(all_v_rel, cur_rel_phase)
@@ -138,16 +149,25 @@ class AnemometerProcessor:
             if not self.is_duct:
                 vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
                 self._update_directional_vel(vx, vy, vz)
-                m, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+                speed, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
-                self.add_to_general_graph((timestamp, m), 3)
+                self.add_to_general_graph((timestamp, speed), 3)
                 self.add_to_general_graph((timestamp, theta), 4)
                 self.add_to_general_graph((timestamp, phi), 5)
-                self.past_5_velocity_magnitudes.append(m)
+                self.past_5_velocity_magnitudes.append(speed)
 
+            if self.is_duct:
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.speed = np.mean(all_v_rel)
+            else:
+                self.add_to_strip_graph(timestamp, speed, all_temps, theta)
+                self.speed = speed
+            self.temp_measured = temp
+            self.radial = theta
+            self.vertical = phi
             self._graph_medians()
 
         # Rotate over the readings to prepare for the next reading.
@@ -156,6 +176,7 @@ class AnemometerProcessor:
         self._cur_abs_phase = next_abs_phase
 
     def _process_reading_temperature(self, reading):
+        # Only append to buffers at the end of the function. Ideally, do locking to make buffers threadsafe
         print(self.anemometer_id, "processing reading")
         num_sensors = reading.num_sensors
         timestamp = time.time() - self.start_time
@@ -185,10 +206,14 @@ class AnemometerProcessor:
         else:
             d = 0.1875 if self.is_duct else 0.06
             all_v_rel = []
+            all_temps = []
             TOF_temp = self.temp_to_TOF(temp)
             TOF_diff = self._calibrated_TOF - TOF_temp
             f = 180000  # 180000 khz
             phase_diff = TOF_diff * f * 360
+            speed = 0
+            theta = None
+            phi = None
 
             for i in range(len(self.paths)):
                 (src, dst) = self.paths[i]
@@ -199,27 +224,41 @@ class AnemometerProcessor:
                 phase_ab = phase_diff + avg + delta
                 phase_ba = phase_diff + avg - delta
                 abs_phase_ab = abs_phases[(src, dst)]
-                velocity, temp = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
-                temp = reading.temperature
+                velocity, temp_calculated, success = self.phase_to_velocity_temp(phase_ab, phase_ba, d)
+                if not success:
+                    self._prev_abs_phase = abs_phases
+                    return
+                speed = velocity
 
                 self.add_to_toggle_graph((timestamp, (phase_ab, phase_ba, abs_phase_ab, velocity)), i)
                 if self.is_duct:
-                    self.add_to_general_graph((timestamp, temp), i)
+                    self.add_to_general_graph((timestamp, temp_calculated), i)
                 all_v_rel.append(velocity)
+                all_temps.append(temp_calculated)
 
             # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
             if not self.is_duct:
                 vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
                 self._update_directional_vel(vx, vy, vz)
-                m, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+                speed, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
-                self.add_to_general_graph((timestamp, m), 3)
+                self.add_to_general_graph((timestamp, speed), 3)
                 self.add_to_general_graph((timestamp, theta), 4)
                 self.add_to_general_graph((timestamp, phi), 5)
-                self.past_5_velocity_magnitudes.append(m)
+                self.past_5_velocity_magnitudes.append(speed)
+
+            if self.is_duct:
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.speed = np.mean(all_v_rel)
+            else:
+                self.add_to_strip_graph(timestamp, speed, all_temps, theta)
+                self.speed = speed
+            self.temp_measured = temp
+            self.radial = theta
+            self.vertical = phi
 
             self._graph_medians()
 
@@ -413,6 +452,23 @@ class AnemometerProcessor:
             self._graph_medians()
 
     # ================PUBLIC FUNCTIONS=================
+    def start_calibration(self):
+        self.is_calibrating = True
+        if self.algorithm is 0:
+            self._calibration_phases = defaultdict(
+                list)  # {(src, dst) : []}, used to hold rel phases during calibration period
+            self._calibration_indices = defaultdict(
+                list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
+            self._calibrated_index = {}  # {src, dst): index}
+        else:
+            self._calibration_indices = defaultdict(list)
+            self._calibration_phases = defaultdict(list)
+            self._calibration_temperatures = []
+
+            self._calibrated_index = {}
+            self._calibrated_phase = {}
+            self._calibrated_temperature = 0
+            self._calibrated_TOF = 0
 
     def generate_window(self):
         self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
@@ -421,28 +477,44 @@ class AnemometerProcessor:
     def dump_raw_data(self):
         self.data_dump_func()
 
-    def update_medians(self, median_window_size, is_toggle_graph, index):
+    def update_medians(self, median_window_size, graph_type, index):
         # Todo: small bug where buffer may still hold a few medians using the old median window size.
         x_medians = []
         y_medians = []
-        if is_toggle_graph:
+        if graph_type is "toggle":
             if len(self.relative_data[index]) < median_window_size:
-                return ([], [])
+                return [], []
             for i in range(len(self.relative_data[index]) - median_window_size + 1):
                 x_medians.append(np.median([x[0] for x in self.relative_data[index][i: i + median_window_size]]))
                 y_medians.append(np.median([x[1][3] for x in self.relative_data[index][i: i + median_window_size]]))
-        else:
+        elif graph_type is "general":
             if len(self.general_data[index]) < median_window_size:
-                return ([], [])
+                return [], []
             for i in range(len(self.general_data[index]) - median_window_size + 1):
                 x_medians.append(np.median([x[0] for x in self.general_data[index][i: i + median_window_size]]))
                 y_medians.append(np.median([x[1] for x in self.general_data[index][i: i + median_window_size]]))
-        return (x_medians, y_medians)
+        elif graph_type is "strip":
+            if len(self.strip_data[index]) < median_window_size:
+                return [], []
+            for i in range(len(self.strip_data[index]) - median_window_size + 1):
+                x_medians.append(np.median([x[0] for x in self.strip_data[index][i: i + median_window_size]]))
+                if not self.is_duct:
+                    y_medians.append(np.median([x[1] for x in self.strip_data[index][i: i + median_window_size]]))
+                else:
+                    y_medians = [[] for _ in range(len(self.paths))]
+                    for path in range(len(self.paths)):
+                        y_medians[path].append(np.median([x[1][path] for x in self.strip_data[index][i: i + median_window_size]]))
+        return x_medians, y_medians
 
     def temp_to_TOF(self, temperature):
         speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
         dist = 0.1875 if self.is_duct else 0.06
         return dist / speed
+
+    def velocity_to_temp(self, velocity):
+        # calibrated black magic
+        temp = (-(velocity - 331.5)/0.607+18.5)*2+24
+        return temp
 
     def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
         tof_ab = phase_ab / (360 * 180000)  # khz?
@@ -456,13 +528,35 @@ class AnemometerProcessor:
             v_ba = dist / (dist / 343 + tof_ba)
 
         v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
-        avg = (v_ab + v_ba) / 2
-        temp = avg * avg / 400 - 273.15
-        return v_rel, temp
+        avg_v = (v_ab + v_ba) / 2
+        if abs(v_rel) >= 6:
+            print("v_rel > 6", phase_ab, phase_ba)
+            return 0, 0, False     # do blank instead
+        # temp = + avg_v * avg_v / 400 - 273.15
+        temp = self.velocity_to_temp(avg_v)
+        return v_rel, temp, True
+
+    def _filter_path_vel(self, path_vel):
+        filtered = list(path_vel)
+        for i in range(len(path_vel)):
+            self.path_vels[i].append(path_vel[i])
+            if abs(path_vel[i]) < 0.5:
+                med = np.median(self.path_vels[i])
+                if abs(med) < abs(path_vel[i]):
+                    # print("lower pathvel: ", med, path_vel[i])
+                    filtered[i] = med
+        return filtered
 
     # Calculate directional velocities (vx, vy, vz) for room anemometer.
     # Weighted assuming node 1 at bottom. Path velocities must be in order
     def path_vel_to_directional_vel(self, path_vel):
+        path_vel = self._filter_path_vel(path_vel)
+        if self.use_room_min:
+            w = 0.85
+            v = 1.1
+        else:
+            w = 0.9
+            v = 1.15    # Todo: these are placeholders
         sin30 = np.sin(np.pi / 6)
         sin60 = np.sin(np.pi / 3)
         vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
@@ -475,43 +569,43 @@ class AnemometerProcessor:
         tny = 5  # 6 if 15degree coordinate system
         tnz = []
         if (0 > abs(path_vel[1]) / path_vel[2] > - 0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
             tnx = 2
             tny = 3
             tnz = [0, 3]
         if (0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
             tnx = 2
             tny = 3
             tnz = [0, 4]
         if (0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.8, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w] # TODO: This was previously [0, sin30 * 0.85, 1 * 0.8, ...]
             tnx = 2
             tny = 3
             tnz = [3, 4]
-        #
+
         if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         if (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         if (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         vx = sum(sorted([i[0] / i[1] for i in zip(path_vel, vx_weight) if i[1] != 0])) / tnx
         vy = sum(sorted([i[0] / i[1] for i in zip(path_vel, vy_weight) if i[1] != 0])) / tny
         vz = sum(sorted([i[0] / i[1] for i in zip(path_vel, vz_weight) if i[1] != 0])) / 3
-        if (len(tnz) > 1):
+        if len(tnz) > 1:
             vp = np.sqrt(vx * vx + vy * vy)
             # vz = (all_v_rel[tnz[0]]/vz_weight[tnz[0]]+all_v_rel[tnz[1]]/vz_weight[tnz[1]])/2
         # vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
@@ -520,7 +614,7 @@ class AnemometerProcessor:
         return vx, vy, vz
 
     def directional_velocities_to_spherical_coordinates(self, vx, vy, vz):
-        m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        # theta calculation
         avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
             self.past_5_velocity_magnitudes)
         theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
@@ -531,11 +625,31 @@ class AnemometerProcessor:
         # do only when sqrt(vx^2 + vy^2) < 0.5
         # for visualization, to cancel out noise and approach 0
         # Begin added by Yannan
-        if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
-            temp_vx = mean(self.past_vx)
-            temp_vy = mean(self.past_vy)
-            temp_vz = mean(self.past_vz)
-            m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
+        #     temp_vx = mean(self.past_vx)
+        #     temp_vy = mean(self.past_vy)
+        #     temp_vz = mean(self.past_vz)
+        #     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        # # New m calculation
+        # temp_vx = self._median_in_window(self.past_vx)
+        # temp_vy = self._median_in_window(self.past_vy)
+        # temp_vz = self._median_in_window(self.past_vz)
+        # m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        #
+        # # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
+        if m < 0.5:
+            temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
+            temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
+            temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
+            temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+            # if temp_m < m:
+            #     print("lower! ", temp_m, m)
+            m = min(m, temp_m)
+
+        # phi calculation
         if len(self.past_vx) < 10:
             phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         else:
@@ -567,6 +681,33 @@ class AnemometerProcessor:
     def add_to_toggle_graph(self, point, index):
         self.toggle_graph_buffer[index].append(point)
         self.relative_data[index].append(point)
+
+    def add_to_strip_graph(self, timestamp, speeds, temps, radial=None):
+        if not self.is_duct:
+            temps = np.mean(temps)  # Graph the average of the path temperatures for room anemometer
+        self.strip_graph_buffer[0].append((timestamp, speeds))
+        self.strip_data[0].append((timestamp, speeds))
+        self.strip_graph_buffer[1].append((timestamp, temps))
+        self.strip_data[1].append((timestamp, temps))
+        if radial is not None:
+            self.strip_graph_buffer[2].append((timestamp, radial))
+            self.strip_data[2].append((timestamp, radial))
+
+    def get_speed(self):
+        return self.speed_med
+
+    def get_temp_measured(self):
+        return self.temp_measured
+
+    def get_radial(self):
+        return self.radial_med
+
+    # todo: save vertical medians too
+    def get_vertical(self):
+        return self.vertical
+
+    def get_averaging_window(self):
+        return self.median_window_size
 
     # ================HELPER FUNCTIONS=================
 
@@ -671,6 +812,7 @@ class AnemometerProcessor:
 
     def _graph_medians(self):
         if len(self.general_data[0]) >= self.median_window_size:
+            # Find medians for general and toggle graphs
             for i in range(len(self.paths)):
                 y_med = np.median([x[1] for x in self.general_data[i][-self.median_window_size:]])
                 x_med = np.median([x[0] for x in self.general_data[i][-self.median_window_size:]])
@@ -680,6 +822,48 @@ class AnemometerProcessor:
                     [x[1][3] for x in self.relative_data[i][-self.median_window_size:]])  # Median relative velocity
                 x_med = np.median([x[0] for x in self.relative_data[i][-self.median_window_size:]])
                 self.toggle_graph_buffer_med[i].append((x_med, y_med))
+
+            # Find medians for strip graphs
+            # speed
+            if not self.is_duct:
+                y_med = np.median([x[1] for x in self.strip_data[0][-self.median_window_size:]])
+                x_med = np.median([x[0] for x in self.strip_data[0][-self.median_window_size:]])
+                self.strip_graph_buffer_med[0].append((x_med, y_med))
+                self.speed_med = y_med
+            else:
+                y_meds = []
+                x_med = np.median([x[0] for x in self.strip_data[0][-self.median_window_size:]])
+                for i in range(len(self.paths)):
+                    y_med = np.median([x[1][i] for x in self.strip_data[0][-self.median_window_size:]])
+                    y_meds.append(y_med)
+                self.strip_graph_buffer_med[0].append((x_med, y_meds))
+            # temp
+            if not self.is_duct:
+                y_med = np.median([x[1] for x in self.strip_data[1][-self.median_window_size:]])
+                x_med = np.median([x[0] for x in self.strip_data[1][-self.median_window_size:]])
+                self.strip_graph_buffer_med[1].append((x_med, y_med))
+            else:
+                y_meds = []
+                x_med = np.median([x[0] for x in self.strip_data[1][-self.median_window_size:]])
+                for i in range(len(self.paths)):
+                    y_med = np.median([x[1][i] for x in self.strip_data[1][-self.median_window_size:]])
+                    y_meds.append(y_med)
+                self.strip_graph_buffer_med[1].append((x_med, y_meds))
+            # azimuth
+            if not self.is_duct:
+                y_med = np.median([x[1] for x in self.strip_data[2][-self.median_window_size:]])
+                x_med = np.median([x[0] for x in self.strip_data[2][-self.median_window_size:]])
+                self.strip_graph_buffer_med[2].append((x_med, y_med))
+                self.radial_med = y_med
+
+    def _median_in_window(self, data, window_size=None):
+        if window_size is None:
+            window_size = self.median_window_size
+        if len(data) == 0:
+            print("Warn: taking median of empty list. Returning 0")
+            return 0
+        return np.median(data[-window_size:])
+
 
     def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
         self.is_calibrating = False
@@ -745,7 +929,7 @@ class AnemometerProcessor:
                 count = 0
 
     def _update_directional_vel(self, vx, vy, vz):
-        if len(self.past_vx) < 10:
+        if len(self.past_vx) < self.median_window_size_extended:
             self.past_vx.append(vx)
             self.past_vy.append(vy)
             self.past_vz.append(vz)
