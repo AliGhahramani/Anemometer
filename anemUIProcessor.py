@@ -469,7 +469,7 @@ class AnemometerProcessor:
             self._calibrated_phase = {}
             self._calibrated_temperature = 0
             self._calibrated_TOF = 0
-            
+
     def generate_window(self):
         self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
         return self.aw

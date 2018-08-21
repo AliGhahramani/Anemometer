@@ -66,12 +66,15 @@ class ApplicationWindow(QtWidgets.QDialog):
         self.median_window_label = QtWidgets.QLabel('Median window size', self)
         self.median_window_button = QtWidgets.QPushButton('Set', self)
         self.median_window_button.clicked.connect(self.on_set_median_window_click)
+        self.recalibrate_button = QtWidgets.QPushButton('Recalibrate', self)
+        self.recalibrate_button.clicked.connect(self.on_recalibrate_click)
 
         settings_layout = QtWidgets.QHBoxLayout(self)
         settings_layout.addWidget(self.median_window_label)
         settings_layout.addWidget(self.median_window_textbox)
         settings_layout.addWidget(self.median_window_button)
         settings_layout.addStretch(1)
+        settings_layout.addWidget(self.recalibrate_button)
         layout.addLayout(settings_layout)
 
         self.main_widget.setFocus()
@@ -215,6 +218,9 @@ class ApplicationWindow(QtWidgets.QDialog):
             for graph in self.general_graphs:
                 graph.update_median(new_median_window_size)
             self.strip_graphs.update_median(new_median_window_size)
+
+    def on_recalibrate_click(self):
+        self.anem_processor_owner.start_calibration()
 
     def on_dump_graph_data_click(self):
         filename = 'anemometer_graph_data_' + str(self.anemometer_id) + '.tsv'
