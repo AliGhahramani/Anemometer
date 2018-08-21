@@ -32,12 +32,12 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
     operating_system = platform.system()
     print("OS: ", operating_system)
     if operating_system is "Windows":
-        open_args = ["./input/src.exe"]
+        open_args = [resource_path("./input/src.exe")]
     else:
-        open_args = ["./input/src"]
+        open_args = [resource_path("./input/src")]
     if usb_port is not None:
         open_args.append(usb_port)
-    open_args = ["python", "input.py"]  # if you want to simulate input from test dataset
+    # open_args = ["python", "input.py"]  # if you want to simulate input from test dataset
 
     if site_filter is None:
         p = Popen(open_args, stdout=PIPE)
@@ -97,7 +97,7 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
 
 
 def read_anemometer_IDs():
-    id_file = open("anemometerIDs.txt", "r")
+    id_file = open(resource_path("anemometerIDs.txt"), "r")
     duct_anemometer_ids = []
     room_anemometer_ids = []
     min = True
