@@ -21,7 +21,7 @@ class AnemometerProcessor:
         self.start_time = time.time()
         self.paths = []
         self.median_window_size = 5
-        self.median_window_size_extended = 50
+        self.median_window_size_extended = 5
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
