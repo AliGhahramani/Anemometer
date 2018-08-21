@@ -2,7 +2,7 @@
 import sys, time, os
 
 # CAREFUL! Using threading (and thus, timers) here messes up piping into input...
-with open("temp_jump.txt") as f:
+with open("zero_bias.txt") as f:
     for line in f: 
         print line,
         sys.stdout.flush()

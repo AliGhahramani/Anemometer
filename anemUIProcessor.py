@@ -8,12 +8,13 @@ from anemUIWindow import *
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
     def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period=10,
-                 include_calibration=False):
+                 include_calibration=False, use_room_min=True):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
         self.data_dump_func = data_dump_func
         self.calibration_period = calibration_period
         self.include_calibration = include_calibration
+        self.use_room_min = use_room_min
         self.algorithm = 1  # 0: phase only. 1: Temperature guided\
         self.is_calibrating = True
         self.aw = None
@@ -43,6 +44,7 @@ class AnemometerProcessor:
         self.relative_data = [[] for _ in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
         self.general_data = [[] for _ in range(0, l)]  # Same tuple data as general_graph_buffer, but for all data
         self.strip_data = [[] for _ in range(0, num_strip_graphs)]
+        self.path_vels = [deque(maxlen=self.median_window_size_extended) for _ in range(0, l)]
         self.temp_measured = 0  # most recent measured temp
         self.temp_calculated = 0           # most recent calculated temp
         self.speed = 0          # most recent speed
@@ -56,22 +58,9 @@ class AnemometerProcessor:
             self._prev_rel_phase = {}  # {(src, dst) : number}
             self._prev_abs_phase = {}  # {(src, dst) : number}
             self._cur_abs_phase = {}  # {(src, dst) : number}
-            self._calibration_phases = defaultdict(
-                list)  # {(src, dst) : []}, used to hold rel phases during calibration period
-            self._calibration_indices = defaultdict(
-                list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
-            self._calibrated_index = {}  # {src, dst): index}
         else:
             self._prev_abs_phase = {}
-
-            self._calibration_indices = defaultdict(list)
-            self._calibration_phases = defaultdict(list)
-            self._calibration_temperatures = []
-
-            self._calibrated_index = {}
-            self._calibrated_phase = {}
-            self._calibrated_temperature = 0
-            self._calibrated_TOF = 0
+        self.start_calibration()
 
         # Added by Yannan
         self.past_5_counter = [0, 0, 0, 0, 0, 0]
@@ -463,7 +452,24 @@ class AnemometerProcessor:
             self._graph_medians()
 
     # ================PUBLIC FUNCTIONS=================
+    def start_calibration(self):
+        self.is_calibrating = True
+        if self.algorithm is 0:
+            self._calibration_phases = defaultdict(
+                list)  # {(src, dst) : []}, used to hold rel phases during calibration period
+            self._calibration_indices = defaultdict(
+                list)  # {src, dst): []}, used to hold indices of max-2 during calibration period
+            self._calibrated_index = {}  # {src, dst): index}
+        else:
+            self._calibration_indices = defaultdict(list)
+            self._calibration_phases = defaultdict(list)
+            self._calibration_temperatures = []
 
+            self._calibrated_index = {}
+            self._calibrated_phase = {}
+            self._calibrated_temperature = 0
+            self._calibrated_TOF = 0
+            
     def generate_window(self):
         self.aw = ApplicationWindow(None, self, self.is_duct, self.anemometer_id, self.paths)
         return self.aw
@@ -505,6 +511,11 @@ class AnemometerProcessor:
         dist = 0.1875 if self.is_duct else 0.06
         return dist / speed
 
+    def velocity_to_temp(self, velocity):
+        # calibrated black magic
+        temp = (-(velocity - 331.5)/0.607+18.5)*2+24
+        return temp
+
     def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
         tof_ab = phase_ab / (360 * 180000)  # khz?
         tof_ba = phase_ba / (360 * 180000)
@@ -517,16 +528,35 @@ class AnemometerProcessor:
             v_ba = dist / (dist / 343 + tof_ba)
 
         v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
-        avg = (v_ab + v_ba) / 2
+        avg_v = (v_ab + v_ba) / 2
         if abs(v_rel) >= 6:
             print("v_rel > 6", phase_ab, phase_ba)
             return 0, 0, False     # do blank instead
-        temp = avg * avg / 400 - 273.15
+        # temp = + avg_v * avg_v / 400 - 273.15
+        temp = self.velocity_to_temp(avg_v)
         return v_rel, temp, True
+
+    def _filter_path_vel(self, path_vel):
+        filtered = list(path_vel)
+        for i in range(len(path_vel)):
+            self.path_vels[i].append(path_vel[i])
+            if abs(path_vel[i]) < 0.5:
+                med = np.median(self.path_vels[i])
+                if abs(med) < abs(path_vel[i]):
+                    # print("lower pathvel: ", med, path_vel[i])
+                    filtered[i] = med
+        return filtered
 
     # Calculate directional velocities (vx, vy, vz) for room anemometer.
     # Weighted assuming node 1 at bottom. Path velocities must be in order
     def path_vel_to_directional_vel(self, path_vel):
+        path_vel = self._filter_path_vel(path_vel)
+        if self.use_room_min:
+            w = 0.85
+            v = 1.1
+        else:
+            w = 0.9
+            v = 1.15    # Todo: these are placeholders
         sin30 = np.sin(np.pi / 6)
         sin60 = np.sin(np.pi / 3)
         vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
@@ -539,43 +569,43 @@ class AnemometerProcessor:
         tny = 5  # 6 if 15degree coordinate system
         tnz = []
         if (0 > abs(path_vel[1]) / path_vel[2] > - 0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
             tnx = 2
             tny = 3
             tnz = [0, 3]
         if (0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.85, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
             tnx = 2
             tny = 3
             tnz = [0, 4]
         if (0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5):
-            vx_weight = [0, sin60 * 0.85, 0, 0, 0, -sin60 * 0.85]
-            vy_weight = [0, sin30 * 0.85, 1 * 0.8, 0, 0, sin30 * 0.85]
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w] # TODO: This was previously [0, sin30 * 0.85, 1 * 0.8, ...]
             tnx = 2
             tny = 3
             tnz = [3, 4]
-        #
+
         if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         if (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         if (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
-            vx_weight = [sin30 * sin30 * 1.1, 0, 0, sin30 * 1.1, -sin30 * sin30 * 1.1, 0]
-            vy_weight = [sin60 * sin30 * 1.1, 0, 0, 0, sin60 * sin30 * 1.1, 0]
+            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
+            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
             tnx = 3
             tny = 2
         vx = sum(sorted([i[0] / i[1] for i in zip(path_vel, vx_weight) if i[1] != 0])) / tnx
         vy = sum(sorted([i[0] / i[1] for i in zip(path_vel, vy_weight) if i[1] != 0])) / tny
         vz = sum(sorted([i[0] / i[1] for i in zip(path_vel, vz_weight) if i[1] != 0])) / 3
-        if (len(tnz) > 1):
+        if len(tnz) > 1:
             vp = np.sqrt(vx * vx + vy * vy)
             # vz = (all_v_rel[tnz[0]]/vz_weight[tnz[0]]+all_v_rel[tnz[1]]/vz_weight[tnz[1]])/2
         # vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
@@ -596,27 +626,27 @@ class AnemometerProcessor:
         # for visualization, to cancel out noise and approach 0
         # Begin added by Yannan
 
-        # m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        m = np.sqrt(vx * vx + vy * vy + vz * vz)
         # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
         #     temp_vx = mean(self.past_vx)
         #     temp_vy = mean(self.past_vy)
         #     temp_vz = mean(self.past_vz)
         #     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
 
-        # New m calculation
-        temp_vx = self._median_in_window(self.past_vx)
-        temp_vy = self._median_in_window(self.past_vy)
-        temp_vz = self._median_in_window(self.past_vz)
-        m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-
-        # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
+        # # New m calculation
+        # temp_vx = self._median_in_window(self.past_vx)
+        # temp_vy = self._median_in_window(self.past_vy)
+        # temp_vz = self._median_in_window(self.past_vz)
+        # m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        #
+        # # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
         if m < 0.5:
             temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
             temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
             temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
             temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-            if temp_m < m:
-                print("lower! ", temp_m, m)
+            # if temp_m < m:
+            #     print("lower! ", temp_m, m)
             m = min(m, temp_m)
 
         # phi calculation
@@ -899,7 +929,7 @@ class AnemometerProcessor:
                 count = 0
 
     def _update_directional_vel(self, vx, vy, vz):
-        if len(self.past_vx) < 10:
+        if len(self.past_vx) < self.median_window_size_extended:
             self.past_vx.append(vx)
             self.past_vy.append(vy)
             self.past_vz.append(vz)

@@ -95,10 +95,12 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
     # When the subprocess terminates there might be unconsumed outputthat still needs to be processed.
     print(p.stdout.read())  # (? probably unnecessary)
 
+
 def read_anemometer_IDs():
     id_file = open("anemometerIDs.txt", "r")
     duct_anemometer_ids = []
     room_anemometer_ids = []
+    min = True
     site_id = ""
     usb_port = ""
     for line in id_file:
@@ -112,13 +114,19 @@ def read_anemometer_IDs():
                 usb_port = words[1]
                 if usb_port == "None":
                     usb_port = None
+            elif words[0] == "room" or words[0] == "room:":
+                if words[1].lower() == "min":
+                    min = True
+                elif words[1].lower() == "max":
+                    min = False
+                else:
+                    print("Error: unrecognized room filter scheme; should be 'room min' or 'room max'")
             elif words[1] == "duct":
                 duct_anemometer_ids.append(words[0])
             elif words[1] == "room":
                 room_anemometer_ids.append(words[0])
 
-    return (duct_anemometer_ids, room_anemometer_ids, site_id, usb_port)
-    
+    return (duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, min)
 
 
 def dump_raw_data():
@@ -131,13 +139,12 @@ def dump_raw_data():
     print("Successfully dumped all data to anemometer_raw_data.txt")
 
 
-
 def _create_processors_and_windows():
     for id in duct_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION)
+        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION, use_room_min)
         mainWindow.add_window(anemometer_processors[id].generate_window())
     for id in room_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION)
+        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION, use_room_min)
         mainWindow.add_window(anemometer_processors[id].generate_window())
 
 
@@ -158,7 +165,7 @@ if __name__ == '__main__':
     mainWindow.setWindowTitle("Main hub")
 
     # Set up anemometer stream processors
-    duct_anemometer_ids, room_anemometer_ids, site_id, usb_port = read_anemometer_IDs()
+    duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, use_room_min = read_anemometer_IDs()
     all_anemometer_ids = duct_anemometer_ids + room_anemometer_ids
     print("Tracking duct anemometers: ", duct_anemometer_ids)
     print("Tracking room anemometers: ", room_anemometer_ids)
