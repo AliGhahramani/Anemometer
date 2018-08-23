@@ -7,7 +7,7 @@ from anemUIWindow import *
 
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
-    def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period=10,
+    def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period,
                  include_calibration=False, use_room_min=True):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
@@ -71,6 +71,13 @@ class AnemometerProcessor:
         # duct is 4
         # End added by Yannan
 
+    def get_distance(self):
+        # d = 0.1875 if self.is_duct else 0.06
+        if self.is_duct:
+            return 0.0454
+        else:
+            return 0.06
+
     def process_reading(self, reading):
         if self.algorithm is 0:  # phase only
             self._process_reading_phase(reading)
@@ -115,7 +122,7 @@ class AnemometerProcessor:
         # If not calibrating, calculate pairwise velocities.
         else:
             # TODO: scale distances properly for duct
-            d = 0.1875 if self.is_duct else 0.06
+            d = self.get_distance()
             speed = 0
             theta = None
             phi = None
@@ -177,7 +184,7 @@ class AnemometerProcessor:
 
     def _process_reading_temperature(self, reading):
         # Only append to buffers at the end of the function. Ideally, do locking to make buffers threadsafe
-        print(self.anemometer_id, "processing reading")
+        print(self.anemometer_id, "processing reading using temperature")
         num_sensors = reading.num_sensors
         timestamp = time.time() - self.start_time
         temp = reading.get_temperature()
@@ -204,7 +211,7 @@ class AnemometerProcessor:
                 self._graph_calibration_phase(abs_phases, abs_phases, timestamp)
         # If not calibrating, calculate pairwise velocities
         else:
-            d = 0.1875 if self.is_duct else 0.06
+            d = self.get_distance()
             all_v_rel = []
             all_temps = []
             TOF_temp = self.temp_to_TOF(temp)
@@ -389,9 +396,7 @@ class AnemometerProcessor:
             all_v_rel = []
             for i in range(len(self.paths)):
                 # TODO: scale distances properly for duct
-                d = 0.1875
-                if not self.is_duct:
-                    d = 0.06
+                d = self.get_distance()
                 a, b = self.paths[i]
                 phase_ab = rel_phase[str(a) + "_to_" + str(b)]
                 phase_ba = rel_phase[str(b) + "_to_" + str(a)]
@@ -508,7 +513,7 @@ class AnemometerProcessor:
 
     def temp_to_TOF(self, temperature):
         speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
-        dist = 0.1875 if self.is_duct else 0.06
+        dist = self.get_distance()
         return dist / speed
 
     def velocity_to_temp(self, velocity):
@@ -527,7 +532,7 @@ class AnemometerProcessor:
             v_ab = dist / (dist / 343 + tof_ab)
             v_ba = dist / (dist / 343 + tof_ba)
 
-        v_rel = (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
+        v_rel = -1 * (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
         avg_v = (v_ab + v_ba) / 2
         if abs(v_rel) >= 6:
             print("v_rel > 6", phase_ab, phase_ba)
@@ -837,6 +842,7 @@ class AnemometerProcessor:
                     y_med = np.median([x[1][i] for x in self.strip_data[0][-self.median_window_size:]])
                     y_meds.append(y_med)
                 self.strip_graph_buffer_med[0].append((x_med, y_meds))
+                self.speed_med = np.mean(y_meds)
             # temp
             if not self.is_duct:
                 y_med = np.median([x[1] for x in self.strip_data[1][-self.median_window_size:]])
@@ -879,7 +885,8 @@ class AnemometerProcessor:
                     phase_list[i] = phase_list[i - 1] + d
 
                 print("I am ", self.anemometer_id, " with path ", (src, dst), ", phases: ", phase_list)
-                calibrated_phases[(src, dst)] = mean_within_sd(phase_list, 2)
+                # calibrated_phases[(src, dst)] = mean_within_sd(phase_list, 2)
+                calibrated_phases[(src, dst)] = np.median(phase_list)
 
         if calibration_indices is not None:
             for (src, dst), index_list in calibration_indices.items():
@@ -891,7 +898,8 @@ class AnemometerProcessor:
                 print(self.anemometer_id, "index[", (src, dst), "] = ", index_list, ", mode =", index_mode)
 
         if calibration_temperatures is not None:
-            calibrated_temp = mean_within_sd(calibration_temperatures, 2)
+            # calibrated_temp = mean_within_sd(calibration_temperatures, 2)
+            calibrated_temp = np.median(calibration_temperatures)
 
         return calibrated_phases, calibrated_indices, calibrated_temp
 

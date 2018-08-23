@@ -420,7 +420,7 @@ class StripGraphs(FigureCanvas):
                         val = self.ymin[g]
                         index = 0
                         for i in range(4):
-                            v, ind = find_min_max_index(self.ydata_med[g][i], self.ymax_index[g][1] + 1, True)
+                            v, ind = find_min_max_index(self.ydata_med[g][i], self.ymax_index[g][1] + 1, False)
                             if v > val:
                                 val = v
                                 index = ind
@@ -579,24 +579,25 @@ class ToggleableGraph(FigureCanvas):
             try:
                 if x - GRAPH_MAX_X_WINDOW > self.ymin_phase_index[0]:
                     search_start = self.ymin_phase_index[1] + 1
-                    self.ymin_phase = self.y_phase_ab[search_start]
+                    self.ymin_phase = self.ydata_phase_ab[search_start]
                     self.ymin_phase_index = (self.xdata[search_start], search_start)
-                    for i in range(search_start, len(self.y_phase_ab)):
-                        if self.y_phase_ab[i] < self.ymin_phase:
-                            self.ymin_phase = self.y_phase_ab[i]
+                    for i in range(search_start, len(self.ydata_phase_ab)):
+                        if self.ydata_phase_ab[i] < self.ymin_phase:
+                            self.ymin_phase = self.ydata_phase_ab[i]
                             self.ymin_phase_index = (self.xdata[i], i)
-                        if self.y_phase_ba[i] < self.ymin_phase:
-                            self.ymin_phase = self.y_phase_ba[i]
+                        if self.ydata_phase_ba[i] < self.ymin_phase:
+                            self.ymin_phase = self.ydata_phase_ba[i]
                             self.ymin_phase_index = (self.xdata[i], i)
                 if x - GRAPH_MAX_X_WINDOW > self.ymax_phase_index[0]:
-                    self.ymax_phase = self.y_phase_ab[search_start]
+                    search_start = self.ymax_phase_index[1] + 1
+                    self.ymax_phase = self.ydata_phase_ab[search_start]
                     self.ymax_phase_index = (self.xdata[search_start], search_start)
-                    for i in range(search_start, len(self.y_phase_ab)):
-                        if self.y_phase_ab[i] > self.ymax_phase:
-                            self.ymax_phase = self.y_phase_ab[i]
+                    for i in range(search_start, len(self.ydata_phase_ab)):
+                        if self.ydata_phase_ab[i] > self.ymax_phase:
+                            self.ymax_phase = self.ydata_phase_ab[i]
                             self.ymax_phase_index = (self.xdata[i], i)
-                        if self.y_phase_ba[i] > self.ymax_phase:
-                            self.ymax_phase = self.y_phase_ba[i]
+                        if self.ydata_phase_ba[i] > self.ymax_phase:
+                            self.ymax_phase = self.ydata_phase_ba[i]
                             self.ymax_phase_index = (self.xdata[i], i)
             except IndexError:
                 # edge case. Probably don't worry about this.
@@ -606,10 +607,10 @@ class ToggleableGraph(FigureCanvas):
             self.axes.set_ylim(ylim_min, 1.5 * self.ymax_phase)
             self.draw()
 
-            self.ln.set_data(self.xdata, self.ydata_phase_ab)
+            self.ln.set_data(self.xdata, self.ydata_phase_ab) # blue
             self.ln_median.set_data([], [])
-            self.ln2.set_data(self.xdata, self.ydata_phase_ba)
-            self.ln3.set_data(self.xdata, self.ydata_abs_phase_ab)
+            self.ln2.set_data(self.xdata, self.ydata_phase_ba) # red
+            self.ln3.set_data(self.xdata, self.ydata_abs_phase_ab) # yellow
             # todo fix
         else:
             # Adjust ymin, ymax to be the largest and smallest y values in the current viewing window

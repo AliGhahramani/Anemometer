@@ -140,11 +140,13 @@ def dump_raw_data():
 
 
 def _create_processors_and_windows():
+    calibration_period_room = 10
+    calibration_period_duct = 30
     for id in duct_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION, use_room_min)
+        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, calibration_period_duct, INCLUDE_CALIBRATION, use_room_min)
         mainWindow.add_window(anemometer_processors[id].generate_window())
     for id in room_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, CALIBRATION_PERIOD, INCLUDE_CALIBRATION, use_room_min)
+        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, calibration_period_room, INCLUDE_CALIBRATION, use_room_min)
         mainWindow.add_window(anemometer_processors[id].generate_window())
 
 
@@ -156,7 +158,6 @@ if __name__ == '__main__':
     duct_anemometer_ids = []
     room_anemometer_ids = []
     all_anemometer_ids = []
-    CALIBRATION_PERIOD = 10  # number of readings to consider calibration period
     INCLUDE_CALIBRATION = False
 
     # Set up app
