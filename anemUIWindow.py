@@ -305,12 +305,15 @@ class StripGraphs(FigureCanvas):
         self.ydata = [[] for _ in range(self.num_graphs)]
         self.xdata_med = [[] for _ in range(self.num_graphs)]
         self.ydata_med = [[] for _ in range(self.num_graphs)]
+        self.xdata_blank = [[] for _ in range(self.num_graphs)]
+        self.ydata_blank = [[] for _ in range(self.num_graphs)]
         self.ymin = [0 for _ in range(self.num_graphs)]
         self.ymax = [0 for _ in range(self.num_graphs)]
         self.ymin_index = [(0, 0) for _ in range(self.num_graphs)]     # each tuple is (x value, index at min y point)
         self.ymax_index = [(0, 0) for _ in range(self.num_graphs)]
         self.ln = [None for _ in range(self.num_graphs)]
         self.ln_med = [None for _ in range(self.num_graphs)]
+        self.ln_blank = [None for _ in range(self.num_graphs)]
 
         self.compute_initial_figure()
 
@@ -332,20 +335,25 @@ class StripGraphs(FigureCanvas):
                 # 2 lines per graph: one for raw data, one for medians
                 ln, = self.axes[i].plot(self.xdata[i], self.ydata[i], '.', markersize=0.5, color='gray')
                 ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i], 'ro', markersize=1)
+                ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i], 'o', markersize=1, color='gray')
                 self.ln[i] = ln
                 self.ln_med[i] = ln_med
+                self.ln_blank[i] = ln_blank
             else:
                 # 8 lines per graph: 4 for raw data, 4 for medians
                 colors=['red', 'green', 'cyan', 'blue']
                 self.ln[i] = []
                 self.ln_med[i] = []
+                self.ln_blank = []
                 self.ydata[i] = [[] for _ in range(4)]
                 self.ydata_med[i] = [[] for _ in range(4)]
                 for j in range(4):
                     ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
                     ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
+                    ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i][j], 'o', markersize=1, color='gray')
                     self.ln[i].append(ln)
                     self.ln_med[i].append(ln_med)
+                    self.ln_blank.append(ln_blank)
         if self.include_radial:
             self.axes[2].set_ylim(-180, 180)
             self.axes[2].set_yticks([-180, -90, 0, 90, 180])
@@ -371,6 +379,7 @@ class StripGraphs(FigureCanvas):
             x = 0
             buf_len = len(self.anem_processor_owner.strip_graph_buffer[g])
             med_buf_len = len(self.anem_processor_owner.strip_graph_buffer_med[g])
+            blank_buf_len = len(self.anem_processor_owner.strip_graph_buffer_blank[g])
             for i in range(buf_len):
                 (x, y) = self.anem_processor_owner.strip_graph_buffer[g][i]
                 self.xdata[g].append(x)
@@ -395,9 +404,19 @@ class StripGraphs(FigureCanvas):
                     self.ymin[g] = np.min(y_med)
                     self.ymin_index[g] = (x_med, len(self.xdata[g]))
 
+            for i in range(blank_buf_len):
+                (x, y) = self.anem_processor_owner.strip_graph_buffer_blank[g][i]
+                self.xdata_blank[g].append(x)
+                if self.is_duct:
+                    for j in range(4):
+                        self.ydata_blank[g][j].append(y[j])
+                else:
+                    self.ydata_blank[g].append(y)
+
             # Clear processed elements from buffer
             self.anem_processor_owner.strip_graph_buffer[g] = self.anem_processor_owner.strip_graph_buffer[g][buf_len:]
             self.anem_processor_owner.strip_graph_buffer_med[g] = self.anem_processor_owner.strip_graph_buffer_med[g][med_buf_len:]
+            self.anem_processor_owner.strip_graph_buffer_blank[g] = self.anem_processor_owner.strip_graph_buffer_blank[g][blank_buf_len:]
 
             # Scale axes
             try:
@@ -445,10 +464,11 @@ class StripGraphs(FigureCanvas):
                 for i in range(4):
                     self.ln[g][i].set_data(self.xdata[g], self.ydata[g][i])
                     self.ln_med[g][i].set_data(self.xdata_med[g], self.ydata_med[g][i])
+                    self.ln_blank[g][i].set_data(self.xdata_blank[g], self.ydata_blank[g][i])
             else:
                 self.ln[g].set_data(self.xdata[g], self.ydata[g])
                 self.ln_med[g].set_data(self.xdata_med[g], self.ydata_med[g])
-
+                self.ln_blank[g].set_data(self.xdata_blank[g], self.ydata_blank[g])
         return self.ln
 
 
@@ -683,6 +703,8 @@ class GeneralGraph(FigureCanvas):
         self.ydata = []
         self.xdata_med = []
         self.ydata_med = []
+        self.xdata_blank = []
+        self.ydata_blank = []
         self.ymin = 0
         self.ymax = 0
         self.ymin_index = (0, 0)
@@ -706,6 +728,7 @@ class GeneralGraph(FigureCanvas):
     def compute_initial_figure(self, yrange, yticks):
         self.ln, = self.axes.plot(self.xdata, self.ydata, 'o', markersize=1)
         self.ln_med, = self.axes.plot(self.xdata_med, self.ydata_med, 'ro', markersize=1)
+        self.ln_blank, = self.axes.plot(self.xdata_blank, self.ydata_blank, 'o', markersize=1, color='gray')
         if yrange is not None:
             self.axes.set_ylim(yrange[0], yrange[1])
             # self.axes.autoscale(False)
@@ -725,6 +748,7 @@ class GeneralGraph(FigureCanvas):
         x = 0
         val_buffer_len = len(self.anem_processor_owner.general_graph_buffer[self.inbuf_index])
         median_buffer_len = len(self.anem_processor_owner.general_graph_buffer_med[self.inbuf_index])
+        blank_buffer_len = len(self.anem_processor_owner.general_graph_buffer_blank[self.inbuf_index])
         for i in range(val_buffer_len):
             (x, y) = self.anem_processor_owner.general_graph_buffer[self.inbuf_index][i]
             self.xdata.append(x)
@@ -741,9 +765,15 @@ class GeneralGraph(FigureCanvas):
             self.xdata_med.append(x_med)
             self.ydata_med.append(y_med)
 
+        for i in range(blank_buffer_len):
+            (x, y) = self.anem_processor_owner.general_graph_buffer_blank[self.inbuf_index][i]
+            self.xdata_blank.append(x)
+            self.ydata_blank.append(y)
+
         # Clear from the buffer the elements just processed
         self.anem_processor_owner.general_graph_buffer[self.inbuf_index] = self.anem_processor_owner.general_graph_buffer[self.inbuf_index][val_buffer_len:]
         self.anem_processor_owner.general_graph_buffer_med[self.inbuf_index] = self.anem_processor_owner.general_graph_buffer_med[self.inbuf_index][median_buffer_len:]
+        self.anem_processor_owner.general_graph_buffer_blank[self.inbuf_index] = self.anem_processor_owner.general_graph_buffer_blank[self.inbuf_index][blank_buffer_len:]
 
         # set view frame so you can see the entire line
         # TODO: This should be synchronized across all similar graphs.
@@ -777,6 +807,7 @@ class GeneralGraph(FigureCanvas):
             self.draw()
         self.ln.set_data(self.xdata, self.ydata)
         self.ln_med.set_data(self.xdata_med, self.ydata_med)
+        self.ln_blank.set_data(self.xdata_blank, self.ydata_blank)
         # return self.ln,
         return self.ln
 

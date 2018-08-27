@@ -22,6 +22,8 @@ class AnemometerProcessor:
         self.paths = []
         self.median_window_size = 5
         self.median_window_size_extended = 5
+        self.low_velocity_threshold = 0.2
+        self.m_zero = 0.1  # velocities at this speed and below are mapped to 0 m/s
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
@@ -39,6 +41,8 @@ class AnemometerProcessor:
         self.toggle_graph_buffer_med = [[] for _ in range(0, l)]  # medians
         self.general_graph_buffer_med = [[] for _ in range(0, l)]  # medians
         self.strip_graph_buffer_med = [[] for _ in range(0, num_strip_graphs)]
+        self.general_graph_buffer_blank = [[] for _ in range (0, l)]
+        self.strip_graph_buffer_blank = [[] for _ in range(0, num_strip_graphs)]
 
         # Data history
         self.relative_data = [[] for _ in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
@@ -162,12 +166,12 @@ class AnemometerProcessor:
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
                 self.add_to_general_graph((timestamp, speed), 3)
-                self.add_to_general_graph((timestamp, theta), 4)
-                self.add_to_general_graph((timestamp, phi), 5)
+                self.add_to_general_graph((timestamp, theta), 4, speed < self.low_velocity_threshold)
+                self.add_to_general_graph((timestamp, phi), 5, speed < self.low_velocity_threshold)
                 self.past_5_velocity_magnitudes.append(speed)
 
             if self.is_duct:
-                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
                 self.add_to_strip_graph(timestamp, speed, all_temps, theta)
@@ -253,12 +257,12 @@ class AnemometerProcessor:
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
                 self.add_to_general_graph((timestamp, speed), 3)
-                self.add_to_general_graph((timestamp, theta), 4)
-                self.add_to_general_graph((timestamp, phi), 5)
+                self.add_to_general_graph((timestamp, theta), 4, speed < self.low_velocity_threshold)
+                self.add_to_general_graph((timestamp, phi), 5, speed < self.low_velocity_threshold)
                 self.past_5_velocity_magnitudes.append(speed)
 
             if self.is_duct:
-                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
                 self.add_to_strip_graph(timestamp, speed, all_temps, theta)
@@ -513,13 +517,11 @@ class AnemometerProcessor:
 
     def temp_to_TOF(self, temperature):
         speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
-        dist = self.get_distance()
-        return dist / speed
+        return self.get_distance() / speed
 
     def velocity_to_temp(self, velocity):
         # calibrated black magic
-        temp = (-(velocity - 331.5)/0.607+18.5)*2+24
-        return temp
+        return (-(velocity - 331.5)/0.607+18.5)*2+24
 
     def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
         tof_ab = phase_ab / (360 * 180000)  # khz?
@@ -555,7 +557,7 @@ class AnemometerProcessor:
     # Calculate directional velocities (vx, vy, vz) for room anemometer.
     # Weighted assuming node 1 at bottom. Path velocities must be in order
     def path_vel_to_directional_vel(self, path_vel):
-        path_vel = self._filter_path_vel(path_vel)
+        # path_vel = self._filter_path_vel(path_vel)
         if self.use_room_min:
             w = 0.85
             v = 1.1
@@ -632,6 +634,12 @@ class AnemometerProcessor:
         # Begin added by Yannan
 
         m = np.sqrt(vx * vx + vy * vy + vz * vz)
+        # Simple low speed positive-bias filter: linearly interpolate towards 0 when speed below low_velocity_threshold
+        if m < self.low_velocity_threshold:
+            if m <= self.m_zero:
+                m = 0
+            else:
+                m = (m - self.m_zero)/(self.low_velocity_threshold - self.m_zero) * self.low_velocity_threshold
         # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
         #     temp_vx = mean(self.past_vx)
         #     temp_vy = mean(self.past_vy)
@@ -645,14 +653,14 @@ class AnemometerProcessor:
         # m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
         #
         # # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
-        if m < 0.5:
-            temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
-            temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
-            temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
-            temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-            # if temp_m < m:
-            #     print("lower! ", temp_m, m)
-            m = min(m, temp_m)
+        # if m < 0.5:
+        #     temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
+        #     temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
+        #     temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
+        #     temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        #     # if temp_m < m:
+        #     #     print("lower! ", temp_m, m)
+        #     m = min(m, temp_m)
 
         # phi calculation
         if len(self.past_vx) < 10:
@@ -679,9 +687,12 @@ class AnemometerProcessor:
                 phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         return m, theta, phi
 
-    def add_to_general_graph(self, point, index):
-        self.general_graph_buffer[index].append(point)
-        self.general_data[index].append(point)
+    def add_to_general_graph(self, point, index, is_blank=False):
+        if not is_blank:
+            self.general_graph_buffer[index].append(point)
+            self.general_data[index].append(point)
+        else:
+            self.general_graph_buffer_blank[index].append((point[0], 0))    # graph this point at (x, 0) and gray it out
 
     def add_to_toggle_graph(self, point, index):
         self.toggle_graph_buffer[index].append(point)
@@ -695,8 +706,12 @@ class AnemometerProcessor:
         self.strip_graph_buffer[1].append((timestamp, temps))
         self.strip_data[1].append((timestamp, temps))
         if radial is not None:
-            self.strip_graph_buffer[2].append((timestamp, radial))
-            self.strip_data[2].append((timestamp, radial))
+            speed = np.mean(speeds)
+            if speed < self.low_velocity_threshold:
+                self.strip_graph_buffer_blank[2].append((timestamp, 0))
+            else:
+                self.strip_graph_buffer[2].append((timestamp, radial))
+                self.strip_data[2].append((timestamp, radial))
 
     def get_speed(self):
         return self.speed_med
