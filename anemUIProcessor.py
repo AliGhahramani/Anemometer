@@ -8,13 +8,15 @@ from anemUIWindow import *
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
     def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period,
-                 include_calibration=False, use_room_min=True):
+                 include_calibration=False, use_room_min=True, duct_dist=0.0454):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
         self.data_dump_func = data_dump_func
         self.calibration_period = calibration_period
         self.include_calibration = include_calibration
         self.use_room_min = use_room_min
+        self.duct_distance = duct_dist
+
         self.algorithm = 1  # 0: phase only. 1: Temperature guided\
         self.is_calibrating = True
         self.aw = None
@@ -22,6 +24,8 @@ class AnemometerProcessor:
         self.paths = []
         self.median_window_size = 5
         self.median_window_size_extended = 5
+        self.low_velocity_threshold = 0.2
+        self.m_zero = 0.1  # velocities at this speed and below are mapped to 0 m/s
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
@@ -39,6 +43,8 @@ class AnemometerProcessor:
         self.toggle_graph_buffer_med = [[] for _ in range(0, l)]  # medians
         self.general_graph_buffer_med = [[] for _ in range(0, l)]  # medians
         self.strip_graph_buffer_med = [[] for _ in range(0, num_strip_graphs)]
+        self.general_graph_buffer_blank = [[] for _ in range (0, l)]
+        self.strip_graph_buffer_blank = [[] for _ in range(0, num_strip_graphs)]
 
         # Data history
         self.relative_data = [[] for _ in range(0, l)]  # Same tuple data as toggle_graph_buffer, but for all data
@@ -74,7 +80,7 @@ class AnemometerProcessor:
     def get_distance(self):
         # d = 0.1875 if self.is_duct else 0.06
         if self.is_duct:
-            return 0.0454
+            return self.duct_distance
         else:
             return 0.06
 
@@ -88,7 +94,7 @@ class AnemometerProcessor:
 
     def _process_reading_phase(self, reading):
         # For each path, calculate absolute phase of reading 2 before max magnitude
-        print(self.anemometer_id, "processing reading")
+        print(self.anemometer_id, "processing reading phase")
         num_sensors = reading.num_sensors
         timestamp = time.time() - self.start_time
         temp = reading.get_temperature()
@@ -148,9 +154,7 @@ class AnemometerProcessor:
                 all_v_rel.append(velocity)
                 all_temps.append(temp_calculated)
 
-            # Added by Yannan
-            self._velocity_outlier_filter(all_v_rel, cur_rel_phase)
-            # End added by Yannan
+            self._filter_velocity_outlier(all_v_rel, cur_rel_phase)
 
             # For room anemometer, also calculate vx, vy, vz, m, theta, phi. Weighted assuming node 1 at bottom.
             if not self.is_duct:
@@ -162,12 +166,12 @@ class AnemometerProcessor:
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
                 self.add_to_general_graph((timestamp, speed), 3)
-                self.add_to_general_graph((timestamp, theta), 4)
-                self.add_to_general_graph((timestamp, phi), 5)
+                self.add_to_general_graph((timestamp, theta), 4, speed < self.low_velocity_threshold)
+                self.add_to_general_graph((timestamp, phi), 5, speed < self.low_velocity_threshold)
                 self.past_5_velocity_magnitudes.append(speed)
 
             if self.is_duct:
-                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
                 self.add_to_strip_graph(timestamp, speed, all_temps, theta)
@@ -253,12 +257,12 @@ class AnemometerProcessor:
                 self.add_to_general_graph((timestamp, vy), 1)
                 self.add_to_general_graph((timestamp, vz), 2)
                 self.add_to_general_graph((timestamp, speed), 3)
-                self.add_to_general_graph((timestamp, theta), 4)
-                self.add_to_general_graph((timestamp, phi), 5)
+                self.add_to_general_graph((timestamp, theta), 4, speed < self.low_velocity_threshold)
+                self.add_to_general_graph((timestamp, phi), 5, speed < self.low_velocity_threshold)
                 self.past_5_velocity_magnitudes.append(speed)
 
             if self.is_duct:
-                self.add_to_strip_graph(timestamp, all_v_rel, all_temps, theta)
+                self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
                 self.add_to_strip_graph(timestamp, speed, all_temps, theta)
@@ -266,7 +270,6 @@ class AnemometerProcessor:
             self.temp_measured = temp
             self.radial = theta
             self.vertical = phi
-
             self._graph_medians()
 
         # Save absolute phase for reference
@@ -426,9 +429,7 @@ class AnemometerProcessor:
             if not self.is_duct:
                 sin30 = np.sin(np.pi / 6)
                 sin60 = np.sin(np.pi / 3)
-                vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
-                vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
-                vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights
                 vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / tnx
                 vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / tny
                 vz = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vz_weight) if i[1] != 0])) / 3
@@ -513,13 +514,11 @@ class AnemometerProcessor:
 
     def temp_to_TOF(self, temperature):
         speed = 331.5 + 0.607 * temperature  # speed of sound in m/s, where temperature is in C
-        dist = self.get_distance()
-        return dist / speed
+        return self.get_distance() / speed
 
     def velocity_to_temp(self, velocity):
         # calibrated black magic
-        temp = (-(velocity - 331.5)/0.607+18.5)*2+24
-        return temp
+        return (-(velocity - 331.5)/0.607+18.5)*2+24
 
     def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
         tof_ab = phase_ab / (360 * 180000)  # khz?
@@ -541,72 +540,65 @@ class AnemometerProcessor:
         temp = self.velocity_to_temp(avg_v)
         return v_rel, temp, True
 
-    def _filter_path_vel(self, path_vel):
-        filtered = list(path_vel)
-        for i in range(len(path_vel)):
-            self.path_vels[i].append(path_vel[i])
-            if abs(path_vel[i]) < 0.5:
-                med = np.median(self.path_vels[i])
-                if abs(med) < abs(path_vel[i]):
-                    # print("lower pathvel: ", med, path_vel[i])
-                    filtered[i] = med
-        return filtered
+    # Assumes node 1 at bottom.
+    def get_directional_velocity_weights(self, w=None, v=None):
+        sin30 = np.sin(np.pi/180 * 30)
+        sin60 = np.sin(np.pi/180 * 60)
+        cos_bot = np.cos(np.pi/180 * 54.74)  # Angle between top plane and bottom transducer is 54.7356 degrees, not 60
+        sin_bot = np.sin(np.pi/180 * 54.74)
+
+        vx_weight = [sin30 * cos_bot, sin60, 0, cos_bot, -sin30 * cos_bot, -sin60]
+        vy_weight = [sin60 * cos_bot, sin30, 1, 0, sin60 * cos_bot, sin30]
+        vz_weight = [-sin_bot, 0, 0, sin_bot, sin_bot, 0]
+        # vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
+        # vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
+        # vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+        if w is not None:
+            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
+            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
+        if v is not None:
+            vx_weight = [sin30 * cos_bot * v, 0, 0, cos_bot * v, -sin30 * cos_bot * v, 0]
+            vy_weight = [sin60 * cos_bot * v, 0, 0, 0, sin60 * cos_bot * v, 0]
+        return vx_weight, vy_weight, vz_weight
 
     # Calculate directional velocities (vx, vy, vz) for room anemometer.
     # Weighted assuming node 1 at bottom. Path velocities must be in order
     def path_vel_to_directional_vel(self, path_vel):
-        path_vel = self._filter_path_vel(path_vel)
+        # path_vel = self._filter_path_vel(path_vel)
         if self.use_room_min:
             w = 0.85
             v = 1.1
         else:
             w = 0.9
             v = 1.15    # Todo: these are placeholders
-        sin30 = np.sin(np.pi / 6)
-        sin60 = np.sin(np.pi / 3)
-        vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
-        vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
-        vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
-        # vx_weight = [0, sin60, 0, 0, 0, -sin60]
-        # vy_weight = [0, sin30, 1, 0, 0, sin30]
-        # vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+        vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights()
+        reweighted_w = False
         tnx = 5  # 6 if 15degree coordinate system
         tny = 5  # 6 if 15degree coordinate system
         tnz = []
-        if (0 > abs(path_vel[1]) / path_vel[2] > - 0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5):
-            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
-            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
-            tnx = 2
-            tny = 3
-            tnz = [0, 3]
-        if (0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5):
-            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
-            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w]
-            tnx = 2
-            tny = 3
-            tnz = [0, 4]
-        if (0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5):
-            vx_weight = [0, sin60 * w, 0, 0, 0, -sin60 * w]
-            vy_weight = [0, sin30 * w, 1 * w, 0, 0, sin30 * w] # TODO: This was previously [0, sin30 * 0.85, 1 * 0.8, ...]
-            tnx = 2
-            tny = 3
-            tnz = [3, 4]
 
-        if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
-            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
+        # Ali's heuristic-based re-weighting
+        if 0 > abs(path_vel[1]) / path_vel[2] > -0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5:
+            reweighted_w = True
+            tnz = [0, 3]
+        if 0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5:
+            reweighted_w = True
+            tnz = [0, 4]
+        if 0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5:
+            reweighted_w = True
+            tnz = [3, 4]
+        if reweighted_w:
+            vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=w)
+            tnx = 2
+            tny = 3
+
+        if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5) or \
+                (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5) or \
+                (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
+            vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
             tnx = 3
             tny = 2
-        if (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5):
-            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
-            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
-            tnx = 3
-            tny = 2
-        if (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
-            vx_weight = [sin30 * sin30 * v, 0, 0, sin30 * v, -sin30 * sin30 * v, 0]
-            vy_weight = [sin60 * sin30 * v, 0, 0, 0, sin60 * sin30 * v, 0]
-            tnx = 3
-            tny = 2
+
         vx = sum(sorted([i[0] / i[1] for i in zip(path_vel, vx_weight) if i[1] != 0])) / tnx
         vy = sum(sorted([i[0] / i[1] for i in zip(path_vel, vy_weight) if i[1] != 0])) / tny
         vz = sum(sorted([i[0] / i[1] for i in zip(path_vel, vz_weight) if i[1] != 0])) / 3
@@ -623,38 +615,15 @@ class AnemometerProcessor:
         avg_m = 0 if len(self.past_5_velocity_magnitudes) == 0 else sum(self.past_5_velocity_magnitudes) / len(
             self.past_5_velocity_magnitudes)
         theta = np.arctan2(vy, vx) * 180 / np.pi if avg_m > 0.5 else 0
-        # modify m for phi -->
-        # keep track of past 10 vx, vy, vz
-        # average of past 10 vx, average of past 10 vy, average of past 10 vz, and then calculate
-        # a temporary m for phi with this value.
-        # do only when sqrt(vx^2 + vy^2) < 0.5
-        # for visualization, to cancel out noise and approach 0
-        # Begin added by Yannan
 
+        # m calculation
         m = np.sqrt(vx * vx + vy * vy + vz * vz)
-        # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
-        #     temp_vx = mean(self.past_vx)
-        #     temp_vy = mean(self.past_vy)
-        #     temp_vz = mean(self.past_vz)
-        #     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        # Simple low speed positive-bias filter: linearly interpolate towards 0 when speed below low_velocity_threshold
+        m = self._filter_magnitude(m)
 
-        # # New m calculation
-        # temp_vx = self._median_in_window(self.past_vx)
-        # temp_vy = self._median_in_window(self.past_vy)
-        # temp_vz = self._median_in_window(self.past_vz)
-        # m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-        #
-        # # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
-        if m < 0.5:
-            temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
-            temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
-            temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
-            temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
-            # if temp_m < m:
-            #     print("lower! ", temp_m, m)
-            m = min(m, temp_m)
-
-        # phi calculation
+        # phi calculation based on
+        # Based on past 10 vx, vy, vz, recalculate m to use in phi calculations when sqrt(vx^2 + vy^2) < 0.5
+        # to cancel out noise and approach 0.
         if len(self.past_vx) < 10:
             phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         else:
@@ -674,14 +643,15 @@ class AnemometerProcessor:
                 temp_m = np.sqrt(pow(vx, 2) + pow(vy, 2) + pow(temp_vz, 2))
                 phi = np.arcsin(temp_vz / temp_m) * 180 / np.pi if avg_m > 0.5 else 0
             else:
-                # End added by Yannan
-                # original
                 phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         return m, theta, phi
 
-    def add_to_general_graph(self, point, index):
-        self.general_graph_buffer[index].append(point)
-        self.general_data[index].append(point)
+    def add_to_general_graph(self, point, index, is_blank=False):
+        if not is_blank:
+            self.general_graph_buffer[index].append(point)
+            self.general_data[index].append(point)
+        else:
+            self.general_graph_buffer_blank[index].append((point[0], 0))    # graph this point at (x, 0) and gray it out
 
     def add_to_toggle_graph(self, point, index):
         self.toggle_graph_buffer[index].append(point)
@@ -695,8 +665,12 @@ class AnemometerProcessor:
         self.strip_graph_buffer[1].append((timestamp, temps))
         self.strip_data[1].append((timestamp, temps))
         if radial is not None:
-            self.strip_graph_buffer[2].append((timestamp, radial))
-            self.strip_data[2].append((timestamp, radial))
+            speed = np.mean(speeds)
+            if speed < self.low_velocity_threshold:
+                self.strip_graph_buffer_blank[2].append((timestamp, 0))
+            else:
+                self.strip_graph_buffer[2].append((timestamp, radial))
+                self.strip_data[2].append((timestamp, radial))
 
     def get_speed(self):
         return self.speed_med
@@ -870,7 +844,6 @@ class AnemometerProcessor:
             return 0
         return np.median(data[-window_size:])
 
-
     def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
         self.is_calibrating = False
         calibrated_phases = {}
@@ -907,7 +880,7 @@ class AnemometerProcessor:
     # place check after for loop, all values have been appended
     # self.toggle_graph_buffer[i].appends v_rel as well --> toggle canvas issue, second priority?
     # otherwise, also need to pass this in and edit somehow (with temporary list, then extend + append possibly)
-    def _velocity_outlier_filter(self, all_v_rel, cur_rel_phase):
+    def _filter_velocity_outlier(self, all_v_rel, cur_rel_phase):
         outlier_index = -1
         for i in range(len(all_v_rel)):
             # Take mean of all values except value in question (not averaging whole thing?)
@@ -936,8 +909,48 @@ class AnemometerProcessor:
             for count in self.past_5_counter:
                 count = 0
 
+    def _filter_path_vel(self, path_vel):
+        filtered = list(path_vel)
+        for i in range(len(path_vel)):
+            self.path_vels[i].append(path_vel[i])
+            if abs(path_vel[i]) < 0.5:
+                med = np.median(self.path_vels[i])
+                if abs(med) < abs(path_vel[i]):
+                    # print("lower pathvel: ", med, path_vel[i])
+                    filtered[i] = med
+        return filtered
+
+    def _filter_magnitude(self, m):
+        if m < self.low_velocity_threshold:
+            if m <= self.m_zero:
+                m = 0
+            else:
+                m = (m - self.m_zero)/(self.low_velocity_threshold - self.m_zero) * self.low_velocity_threshold
+        return m
+        # OTHER m FILTERING METHODS. Not used.
+        # m calculation based on means in low windspeed
+        # if abs(vx) < 0.5 and abs(vy) < 0.5 and abs(vz) < 0.5:
+        #     temp_vx = mean(self.past_vx)
+        #     temp_vy = mean(self.past_vy)
+        #     temp_vz = mean(self.past_vz)
+        #     m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+
+        # # m calculation based on medians
+        # temp_vx = self._median_in_window(self.past_vx)
+        # temp_vy = self._median_in_window(self.past_vy)
+        # temp_vz = self._median_in_window(self.past_vz)
+        # m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        #
+        # # m re-calculation for low windspeeds (to reduce positive bias in zero-wind situations)
+        # if m < 0.5:
+        #     temp_vx = self._median_in_window(self.past_vx, self.median_window_size_extended)
+        #     temp_vy = self._median_in_window(self.past_vy, self.median_window_size_extended)
+        #     temp_vz = self._median_in_window(self.past_vz, self.median_window_size_extended)
+        #     temp_m = np.sqrt(pow(temp_vx, 2) + pow(temp_vy, 2) + pow(temp_vz, 2))
+        #     m = min(m, temp_m)
+
     def _update_directional_vel(self, vx, vy, vz):
-        if len(self.past_vx) < self.median_window_size_extended:
+        if len(self.past_vx) < 10:
             self.past_vx.append(vx)
             self.past_vy.append(vy)
             self.past_vz.append(vz)
@@ -1150,9 +1163,7 @@ def mean_within_sd(nums, sd_boundary):
     #         if not self.is_duct:
     #             sin30 = np.sin(np.pi / 6)
     #             sin60 = np.sin(np.pi / 3)
-    #             vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
-    #             vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
-    #             vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
+    #             vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights()
     #
     #             vx = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vx_weight) if i[1] != 0])) / 5
     #             vy = sum(sorted([i[0] / i[1] for i in zip(all_v_rel, vy_weight) if i[1] != 0])) / 5
