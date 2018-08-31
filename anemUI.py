@@ -96,15 +96,22 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
     print(p.stdout.read())  # (? probably unnecessary)
 
 
-def read_anemometer_IDs():
-    id_file = open(resource_path("anemometerIDs.txt"), "r")
+def read_config():
+    id_file = open(resource_path("config.txt"), "r")
     duct_anemometer_ids = []
     room_anemometer_ids = []
     min = True
-    site_id = ""
-    usb_port = ""
+    duct_dist = None
+    site_id = None
+    usb_port = None
     for line in id_file:
         words = line.split()
+        if len(words) == 3:
+            if words[0] == "duct" and (words[1] == "distance" or words[1] == "distance:"):
+                try:
+                    duct_dist = float(words[2])
+                except ValueError:
+                    print("Error: couldn't parse given duct distance of " + words[2] + ". Using default.")
         if len(words) == 2:
             if words[0] == "site:":
                 site_id = words[1]    # Assumes siteID has no spaces
@@ -126,7 +133,7 @@ def read_anemometer_IDs():
             elif words[1] == "room":
                 room_anemometer_ids.append(words[0])
 
-    return (duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, min)
+    return duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, min, duct_dist
 
 
 def dump_raw_data():
@@ -143,20 +150,16 @@ def _create_processors_and_windows():
     calibration_period_room = 10
     calibration_period_duct = 30
     for id in duct_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, calibration_period_duct, INCLUDE_CALIBRATION, use_room_min)
+        anemometer_processors[id] = AnemometerProcessor(id, True, dump_raw_data, calibration_period_duct, INCLUDE_CALIBRATION, use_room_min, duct_dist)
         mainWindow.add_window(anemometer_processors[id].generate_window())
     for id in room_anemometer_ids:
-        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, calibration_period_room, INCLUDE_CALIBRATION, use_room_min)
+        anemometer_processors[id] = AnemometerProcessor(id, False, dump_raw_data, calibration_period_room, INCLUDE_CALIBRATION, use_room_min, duct_dist)
         mainWindow.add_window(anemometer_processors[id].generate_window())
 
 
 if __name__ == '__main__':
     alldata = []  # list of all input data lines as is
     anemometer_processors = {}  # {anemometer_id : AnemometerProcessor}
-    site_id = None
-    usb_port = None
-    duct_anemometer_ids = []
-    room_anemometer_ids = []
     all_anemometer_ids = []
     INCLUDE_CALIBRATION = False
 
@@ -166,7 +169,7 @@ if __name__ == '__main__':
     mainWindow.setWindowTitle("Main hub")
 
     # Set up anemometer stream processors
-    duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, use_room_min = read_anemometer_IDs()
+    duct_anemometer_ids, room_anemometer_ids, site_id, usb_port, use_room_min, duct_dist = read_config()
     all_anemometer_ids = duct_anemometer_ids + room_anemometer_ids
     print("Tracking duct anemometers: ", duct_anemometer_ids)
     print("Tracking room anemometers: ", room_anemometer_ids)
