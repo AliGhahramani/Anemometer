@@ -77,19 +77,27 @@ def read_input(anemometer_ids=None, site_filter=None, usb_port=None):
         parsed = DecodedRawInput(anemometer_id, timestamp, site, is_duct, is_duct6, is_room)
         success = True
         temps = []
+        accelerometers = []
+        magnetometers = []
         for sensor in range(0, num_sensors):
             sensor_data = data['RawInput']['ChirpHeaders'][sensor]
             if sensor_data is None:
                 print("Data is incomplete, missing sensor ", sensor, ". Skipping. Data line received:\n", line_orig)
                 success = False
                 break
-            temps.append(float(sensor_data['Temperature']))
             parsed_sensor_data = DecodedChirpHeader(sensor, sensor_data['MaxIndex'],
                                                     sensor_data['QValues'], sensor_data['IValues'])
+            temps.append(float(sensor_data['Temperature']))
+            accels = sensor_data['Accelerometer']
+            mags = sensor_data['Magnetometer']
+            accelerometers.append([float(x) for x in accels])
+            magnetometers.append([float(x) for x in mags])
             # print(parsed_sensor_data.id, parsed_sensor_data.max_indices, parsed_sensor_data.real, parsed_sensor_data.imaginary)
             parsed.add_chirp_header(parsed_sensor_data)
         if success:
-            parsed.temperature = temps[0] # all temperature fields are equal.
+            parsed.temperature = temps[0]  # all temp, accelerometer, and magnetometer fields per sensor are equal.
+            parsed.accelerometer = accelerometers[0]
+            parsed.magnetometer = magnetometers[0]
             yield (parsed, line_orig)
 
     # When the subprocess terminates there might be unconsumed outputthat still needs to be processed.

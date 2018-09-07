@@ -161,6 +161,7 @@ class AnemometerProcessor:
                 vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
                 self._update_directional_vel(vx, vy, vz)
                 speed, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+                vx_world, vy_world, vz_world = self.directional_velocities_to_world_coordinates(vx, vy, vz, reading)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
@@ -252,6 +253,7 @@ class AnemometerProcessor:
                 vx, vy, vz = self.path_vel_to_directional_vel(all_v_rel)
                 self._update_directional_vel(vx, vy, vz)
                 speed, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
+                vx_world, vy_world, vz_world = self.directional_velocities_to_world_coordinates(vx, vy, vz, reading)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
@@ -645,6 +647,11 @@ class AnemometerProcessor:
             else:
                 phi = np.arcsin(vz / m) * 180 / np.pi if avg_m > 0.5 else 0
         return m, theta, phi
+
+    def directional_velocities_to_world_coordinates(self, vx, vy, vz, reading):
+        roll, pitch, yaw = reading.get_rotations()
+        return 0, 0, 0
+
 
     def add_to_general_graph(self, point, index, is_blank=False):
         if not is_blank:

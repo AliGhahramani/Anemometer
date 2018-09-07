@@ -1,4 +1,5 @@
 from datetime import datetime
+import numpy as np
 
 squelch = False  # True if you want to squelch warning messages. (TODO: There's probably a nicer way to do this.)
 class DecodedChirpHeader:
@@ -9,7 +10,8 @@ class DecodedChirpHeader:
         self.imaginary = imaginary  # list of lists
 
 class DecodedRawInput:
-    def __init__(self,  anemometer_id="", timestamp=0, site="", is_duct=False, is_duct6=False, is_room=False, temperature=0, num_sensors=4, chirp_headers=None):
+    def __init__(self,  anemometer_id="", timestamp=0, site="", is_duct=False, is_duct6=False, is_room=False,
+                 temperature=0, accelerometer=None, magnetometer=None, num_sensors=4, chirp_headers=None):
         if chirp_headers is None:
             chirp_headers = []
         self.anemometer_id = anemometer_id
@@ -21,6 +23,8 @@ class DecodedRawInput:
         self.num_sensors = num_sensors
         self.chirp_headers = chirp_headers
         self.temperature = temperature
+        self.accelerometer = accelerometer
+        self.magnetometer = magnetometer
 
     def add_chirp_header(self, chirp_header):
         self.chirp_headers.append(chirp_header)
@@ -36,6 +40,28 @@ class DecodedRawInput:
 
     def get_temperature(self):
         return self.temperature
+
+    def get_accelerometer(self):
+        return self.accelerometer
+
+    def get_magnetometer(self):
+        return self.magnetometer
+
+    # Uses accelerometer and magnetometer values to determine roll, pitch, and yaw of anemometer in radians
+    # see paper: https://www.nxp.com/files-static/sensors/doc/app_note/AN4248.pdf
+    def get_rotations(self):
+        # Operations in order of yaw, then pitch, then roll
+        # V, the Hard-Iron vector, has placeholder values for now.
+        v = [0, 0, 0]
+        g = self.accelerometer
+        b = self.magnetometer
+        roll = np.arctan2(g[1], g[2])   # eqn 13
+        pitch = np.arctan(-g[0] / (g[1] * np.sin(roll) + g[2] * np.cos(roll)))
+        yaw = np.arctan2((b[2] - v[2]) * np.sin(roll) - (b[1] - v[1]) * np.cos(roll),
+                         (b[0] - v[0]) * np.cos(pitch) + (b[1]) - v[1] * np.sin(pitch) * np.sin(roll) +
+                         (b[2] - v[2]) * np.sin(pitch) * np.cos(roll))
+        return roll, pitch, yaw
+
 
 # old implementation
 # class PathReading:
