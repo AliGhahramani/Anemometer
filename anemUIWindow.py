@@ -105,14 +105,20 @@ class ApplicationWindow(QtWidgets.QDialog):
         self.temp_label.setFont(self.big_font)
         self.window_label = QtWidgets.QLabel('')
         header_l = QtWidgets.QHBoxLayout()
-        header_l.addWidget(self.speed_label)
-        header_l.addWidget(self.temp_label)
+        header_l.addWidget(self.speed_label, 1)
+        header_l.addWidget(self.temp_label, 1)
         if not self.is_duct:
-            self.azimuth_label = QtWidgets.QLabel('azimuth: 0 °')
-            self.vertical_label = QtWidgets.QLabel('vertical: 0 °')
-            header_l.addWidget(self.azimuth_label)
-            header_l.addWidget(self.vertical_label)
-        header_l.addWidget(self.window_label)
+            header_dir_l = QtWidgets.QGridLayout()
+            self.azimuth_world_label = QtWidgets.QLabel('earth azimuth: 0 °')
+            self.vertical_world_label = QtWidgets.QLabel('earth vertical: 0 °')
+            self.azimuth_anem_label = QtWidgets.QLabel('anemometer azimuth: 0 °')
+            self.vertical_anem_label = QtWidgets.QLabel('anemometer vertical: 0 °')
+            header_dir_l.addWidget(self.azimuth_world_label, 0, 0)
+            header_dir_l.addWidget(self.vertical_world_label, 0, 1)
+            header_dir_l.addWidget(self.azimuth_anem_label, 1, 0)
+            header_dir_l.addWidget(self.vertical_anem_label, 1, 1)
+            header_l.addLayout(header_dir_l, 2)
+        header_l.addWidget(self.window_label, 1)
         l1.addLayout(header_l)
 
         # Create thread to update header periodically
@@ -253,21 +259,28 @@ class ApplicationWindow(QtWidgets.QDialog):
         while True:
             speed = self.anem_processor_owner.get_speed()
             temp = self.anem_processor_owner.get_temp_measured()
-            radial = self.anem_processor_owner.get_radial()
-            vertical = self.anem_processor_owner.get_vertical()
+            radial_anem = self.anem_processor_owner.get_radial_anemometer()
+            radial_world = self.anem_processor_owner.get_radial_world()
+            vertical_anem = self.anem_processor_owner.get_vertical_anemometer()
+            vertical_world = self.anem_processor_owner.get_vertical_world()
             window = self.anem_processor_owner.get_averaging_window()
-            self.set_main_tab_header(speed, temp, window, radial, vertical)
+            self.set_main_tab_header(speed, temp, window, radial_anem, vertical_anem,
+                                     radial_world, vertical_world)
             time.sleep(1)
 
-    def set_main_tab_header(self, speed, temp, averaging_window, azimuth=None, vertical=None):
+    def set_main_tab_header(self, speed, temp, averaging_window, azimuth_anemometer=None, vertical_anemometer=None, azimuth_world=None, vertical_world=None):
         self.speed_label.setText(strformat_double(speed) + " m/s")
         self.temp_label.setText(strformat_double(temp) + " °C")
         self.window_label.setText("averaging over " + str(averaging_window) + " readings")
 
-        if azimuth is not None and not self.is_duct:
-            self.azimuth_label.setText("azimuth: " + strformat_double(azimuth) + " °")
-        if vertical is not None and not self.is_duct:
-            self.vertical_label.setText("vertical: " + strformat_double(vertical) + " °")
+        if azimuth_anemometer is not None and not self.is_duct:
+            self.azimuth_anem_label.setText("anemometer azimuth: " + strformat_double(azimuth_anemometer) + " °")
+        if vertical_anemometer is not None and not self.is_duct:
+            self.vertical_anem_label.setText("anemometer vertical: " + strformat_double(vertical_anemometer) + " °")
+        if azimuth_world is not None and not self.is_duct:
+            self.azimuth_world_label.setText("earth azimuth: " + strformat_double(azimuth_world) + " °")
+        if vertical_world is not None and not self.is_duct:
+            self.vertical_world_label.setText("earth vertical: " + strformat_double(vertical_world) + " °")
 
 
 class StripGraphs(FigureCanvas):
@@ -292,7 +305,15 @@ class StripGraphs(FigureCanvas):
         self.axes[1].set_ylabel("temp (°C)")
         if self.include_radial:
             self.axes.append(self.fig.add_subplot(self.num_graphs, 1, 3))
-            self.axes[2].set_ylabel("azimuth (°)")
+            self.axes[2].set_ylabel("anemometer azimuth (°)", color='r')
+            self.axes[2].tick_params('y', colors='r')
+            self.axes[2].set_yticks([-180, -90, 0, 90, 180])
+
+            self.axis_azimuth_world = self.axes[2].twinx()
+            self.axis_azimuth_world.set_ylabel("earth azimuth (°)", color='b')
+            self.axis_azimuth_world.tick_params('y', colors='b')
+            self.axis_azimuth_world.set_yticks([-180, -90, 0, 90, 180])
+            self.axis_azimuth_world.set_yticklabels(['S', 'E', 'N', 'W', 'S'])
             self.scale_y_axes.append(False)
         for axis in self.axes:
             axis.yaxis.set_minor_locator(ticker.AutoMinorLocator())
@@ -314,6 +335,13 @@ class StripGraphs(FigureCanvas):
         self.ln = [None for _ in range(self.num_graphs)]
         self.ln_med = [None for _ in range(self.num_graphs)]
         self.ln_blank = [None for _ in range(self.num_graphs)]
+
+        # If including azimuth, make an extra line for earth azimuth, and corresponding data stores.
+        if self.include_radial:
+            self.ln_azimuth_world = None
+            self.ln_med_azimuth_world = None
+            self.ydata_azimuth_world = []
+            self.ydata_med_azimuth_world = []
 
         self.compute_initial_figure()
 
@@ -355,15 +383,17 @@ class StripGraphs(FigureCanvas):
                     self.ln[i].append(ln)
                     self.ln_med[i].append(ln_med)
                     self.ln_blank[i].append(ln_blank)
-        if self.include_radial:
-            self.axes[2].set_ylim(-180, 180)
-            self.axes[2].set_yticks([-180, -90, 0, 90, 180])
-            self.axes[2].set_xlim(0, 60)
 
         self.axes[0].set_xlim(0, 60)
         self.axes[0].set_ylim(-1, 3)
         self.axes[1].set_xlim(0, 60)
         self.axes[1].set_ylim(15, 25)
+        if self.include_radial:
+            self.axes[2].set_xlim(0, 60)
+            self.axes[2].set_ylim(-180, 180)
+            # Also, need to add another line to radial for earth azimuth.
+            self.ln_azimuth_world, = self.axes[2].plot(self.xdata[2], self.ydata_azimuth_world, 'o', markersize=0.5, color='gray')
+            self.ln_med_azimuth_world, = self.axes[2].plot(self.xdata_med[2], self.ydata_med_azimuth_world, 'o', markersize=1, color='b')
 
     def animate(self):
         return animation.FuncAnimation(
@@ -387,6 +417,10 @@ class StripGraphs(FigureCanvas):
                 if self.is_duct:
                     for j in range(4):
                         self.ydata[g][j].append(y[j])
+                elif self.include_radial and g == self.num_graphs - 1:
+                    (radial_anem, radial_world) = y
+                    self.ydata[g].append(radial_anem)
+                    self.ydata_azimuth_world.append(radial_world)
                 else:
                     self.ydata[g].append(y)
             for i in range(med_buf_len):
@@ -395,6 +429,10 @@ class StripGraphs(FigureCanvas):
                 if self.is_duct:
                     for j in range(4):
                         self.ydata_med[g][j].append(y_med[j])
+                elif self.include_radial and g == self.num_graphs - 1:
+                    (radial_anem_med, radial_world_med) = y_med
+                    self.ydata_med[g].append(radial_anem_med)
+                    self.ydata_med_azimuth_world.append(radial_world_med)
                 else:
                     self.ydata_med[g].append(y_med)
 
@@ -470,6 +508,10 @@ class StripGraphs(FigureCanvas):
                 self.ln[g].set_data(self.xdata[g], self.ydata[g])
                 self.ln_med[g].set_data(self.xdata_med[g], self.ydata_med[g])
                 self.ln_blank[g].set_data(self.xdata_blank[g], self.ydata_blank[g])
+
+            if self.include_radial and g == self.num_graphs - 1:
+                self.ln_azimuth_world.set_data(self.xdata[g], self.ydata_azimuth_world)
+                self.ln_med_azimuth_world.set_data(self.xdata_med[g], self.ydata_med_azimuth_world)
         return self.ln
 
 

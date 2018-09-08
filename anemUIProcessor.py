@@ -51,14 +51,16 @@ class AnemometerProcessor:
         self.general_data = [[] for _ in range(0, l)]  # Same tuple data as general_graph_buffer, but for all data
         self.strip_data = [[] for _ in range(0, num_strip_graphs)]
         self.path_vels = [deque(maxlen=self.median_window_size_extended) for _ in range(0, l)]
-        self.temp_measured = 0  # most recent measured temp
-        self.temp_calculated = 0           # most recent calculated temp
-        self.speed = 0          # most recent speed
-        self.radial = None      # most recent radial angle. Invalid for room
-        self.vertical = None    # most recent vertical angle. Invalid for room
+        self.temp_measured = 0              # most recent measured temp
+        self.temp_calculated = 0            # most recent calculated temp
+        self.speed = 0                      # most recent speed
+        self.radial_med_anem = None         # most recent radial angle w.r.t. anemometer. Invalid for room
+        self.radial_med_world = None        # most recent radial angle w.r.t. world. Invalid for room
+        self.vertical_anem = None           # most recent vertical angle w.r.t. anemometer. Invalid for room
+        self.vertical_world = None          # most recent vertical angle w.r.t. world. Invalid for room
         self.temp_med = 0
         self.speed_med = 0
-        self.radial_med = None
+
 
         if self.algorithm is 0:
             self._prev_rel_phase = {}  # {(src, dst) : number}
@@ -176,11 +178,11 @@ class AnemometerProcessor:
                 self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
-                self.add_to_strip_graph(timestamp, speed, all_temps, theta)
+                self.add_to_strip_graph(timestamp, speed, all_temps, theta, theta_world)
                 self.speed = speed
             self.temp_measured = temp
-            self.radial = theta
-            self.vertical = phi
+            self.vertical_anem = phi
+            self.vertical_world = phi_world
             self._graph_medians()
 
         # Rotate over the readings to prepare for the next reading.
@@ -260,6 +262,7 @@ class AnemometerProcessor:
                                                                                                            vz_world)
                 print("Sanity check local: ", speed, theta, phi)
                 print("Sanity check world: ", speed_world, theta_world, phi_world)
+                # Should see equal speeds, and similar phi (if anemometer on flat surface)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
@@ -273,11 +276,11 @@ class AnemometerProcessor:
                 self.add_to_strip_graph(timestamp, all_v_rel, all_temps)
                 self.speed = np.mean(all_v_rel)
             else:
-                self.add_to_strip_graph(timestamp, speed, all_temps, theta)
+                self.add_to_strip_graph(timestamp, speed, all_temps, theta, theta_world)
                 self.speed = speed
             self.temp_measured = temp
-            self.radial = theta
-            self.vertical = phi
+            self.vertical_anem = phi
+            self.vertical_world = phi_world
             self._graph_medians()
 
         # Save absolute phase for reference
@@ -679,7 +682,7 @@ class AnemometerProcessor:
         self.toggle_graph_buffer[index].append(point)
         self.relative_data[index].append(point)
 
-    def add_to_strip_graph(self, timestamp, speeds, temps, radial=None):
+    def add_to_strip_graph(self, timestamp, speeds, temps, radial=None, radial_world=None):
         if not self.is_duct:
             temps = np.mean(temps)  # Graph the average of the path temperatures for room anemometer
         self.strip_graph_buffer[0].append((timestamp, speeds))
@@ -691,8 +694,8 @@ class AnemometerProcessor:
             if speed < self.low_velocity_threshold:
                 self.strip_graph_buffer_blank[2].append((timestamp, 0))
             else:
-                self.strip_graph_buffer[2].append((timestamp, radial))
-                self.strip_data[2].append((timestamp, radial))
+                self.strip_graph_buffer[2].append((timestamp, (radial, radial_world)))
+                self.strip_data[2].append((timestamp, (radial, radial_world)))
 
     def get_speed(self):
         return self.speed_med
@@ -700,12 +703,18 @@ class AnemometerProcessor:
     def get_temp_measured(self):
         return self.temp_measured
 
-    def get_radial(self):
-        return self.radial_med
+    def get_radial_anemometer(self):
+        return self.radial_med_anem
+
+    def get_radial_world(self):
+        return self.radial_med_world
 
     # todo: save vertical medians too
-    def get_vertical(self):
-        return self.vertical
+    def get_vertical_anemometer(self):
+        return self.vertical_anem
+
+    def get_vertical_world(self):
+        return self.vertical_world
 
     def get_averaging_window(self):
         return self.median_window_size
@@ -853,10 +862,12 @@ class AnemometerProcessor:
                 self.strip_graph_buffer_med[1].append((x_med, y_meds))
             # azimuth
             if not self.is_duct:
-                y_med = np.median([x[1] for x in self.strip_data[2][-self.median_window_size:]])
+                y_med_anem = np.median([x[1][0] for x in self.strip_data[2][-self.median_window_size:]])
+                y_med_world = np.median([x[1][1] for x in self.strip_data[2][-self.median_window_size:]])
                 x_med = np.median([x[0] for x in self.strip_data[2][-self.median_window_size:]])
-                self.strip_graph_buffer_med[2].append((x_med, y_med))
-                self.radial_med = y_med
+                self.strip_graph_buffer_med[2].append((x_med, (y_med_anem, y_med_world)))
+                self.radial_med_anem = y_med_anem
+                self.radial_med_world = y_med_world
 
     def _median_in_window(self, data, window_size=None):
         if window_size is None:
