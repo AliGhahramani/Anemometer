@@ -62,6 +62,20 @@ class DecodedRawInput:
                          (b[2] - v[2]) * np.sin(pitch) * np.cos(roll))
         return roll, pitch, yaw
 
+    # Returns change of coordinates matrix R from world space to anemometer space, s.t. v_anem = R * v_world
+    def get_rotation_matrix(self):
+        roll, pitch, yaw = self.get_rotations()
+        # v_anem = Rx * Ry * Rz * v_world
+        r_x = np.matrix([[1, 0, 0],
+                         [0, np.cos(roll), np.sin(roll)],
+                         [0, -np.sin(roll), np.cos(roll)]])
+        r_y = np.matrix([[np.cos(pitch), 0, -np.sin(pitch)],
+                         [0, 1, 0],
+                         [np.sin(pitch), 0, np.cos(pitch)]])
+        r_z = np.matrix([[np.cos(yaw), np.sin(yaw), 0],
+                         [-np.sin(yaw), np.cos(yaw), 0],
+                         [0, 0, 1]])
+        return np.dot(r_x, np.dot(r_y, r_z))
 
 # old implementation
 # class PathReading:
