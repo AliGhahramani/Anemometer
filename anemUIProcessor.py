@@ -163,8 +163,6 @@ class AnemometerProcessor:
                 speed, theta, phi = self.directional_velocities_to_spherical_coordinates(vx, vy, vz)
                 vx_world, vy_world, vz_world = self.directional_velocities_to_world_coordinates(vx, vy, vz, reading)
                 speed_world, theta_world, phi_world = self.directional_velocities_to_spherical_coordinates(vx_world, vy_world, vz_world)
-                print("Sanity check local: ", speed, theta, phi)
-                print("Sanity check world: ", speed_world, theta_world, phi_world)
 
                 self.add_to_general_graph((timestamp, vx), 0)
                 self.add_to_general_graph((timestamp, vy), 1)
@@ -659,11 +657,12 @@ class AnemometerProcessor:
     def directional_velocities_to_world_coordinates(self, vx, vy, vz, reading):
         # v_anem = world_to_anem * v_world
         # world_to_anem_inverse * v_anem = v_world
-        v_anem = np.array([vx, vy, vz])
+        v_anem = [vx, vy, vz]
         world_to_anem = reading.get_rotation_matrix()
         try:
             anem_to_world = np.linalg.inv(world_to_anem)
-            return np.dot(anem_to_world, v_anem)
+            v_world = np.dot(anem_to_world, v_anem)
+            return v_world[0, 0], v_world[0, 1], v_world[0, 2]
         except np.linalg.linalg.LinAlgError:
             print("Warning: couldn't invert anemometer rotation matrix.")
             return 0, 0, 0

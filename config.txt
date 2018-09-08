@@ -3,8 +3,4 @@ USBport: None
 duct distance: 0.0454
 room min
 
-269b5cbe4d626479 duct
-
 1c5168930634658d room
-
-c4e9b6983b17658d duct

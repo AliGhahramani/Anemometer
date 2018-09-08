@@ -341,19 +341,20 @@ class StripGraphs(FigureCanvas):
                 self.ln_blank[i] = ln_blank
             else:
                 # 8 lines per graph: 4 for raw data, 4 for medians
-                colors=['red', 'green', 'cyan', 'blue']
+                colors = ['red', 'green', 'cyan', 'blue']
                 self.ln[i] = []
                 self.ln_med[i] = []
-                self.ln_blank = []
+                self.ln_blank[i] = []
                 self.ydata[i] = [[] for _ in range(4)]
                 self.ydata_med[i] = [[] for _ in range(4)]
+                self.ydata_blank[i] = [[] for _ in range(4)]
                 for j in range(4):
                     ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
                     ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
                     ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i][j], 'o', markersize=1, color='gray')
                     self.ln[i].append(ln)
                     self.ln_med[i].append(ln_med)
-                    self.ln_blank.append(ln_blank)
+                    self.ln_blank[i].append(ln_blank)
         if self.include_radial:
             self.axes[2].set_ylim(-180, 180)
             self.axes[2].set_yticks([-180, -90, 0, 90, 180])

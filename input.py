@@ -2,7 +2,7 @@
 import sys, time, os
 
 # CAREFUL! Using threading (and thus, timers) here messes up piping into input...
-with open("anemometer_raw_data.txt") as f:
+with open("temp_jump.txt") as f:
     for line in f: 
         print line,
         sys.stdout.flush()
