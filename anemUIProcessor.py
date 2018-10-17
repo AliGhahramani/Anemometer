@@ -23,9 +23,9 @@ class AnemometerProcessor:
         self.start_time = time.time()
         self.paths = []
         self.median_window_size = 5
-        self.median_window_size_extended = 5
-        self.low_velocity_threshold = 0.2
-        self.m_zero = 0.1  # velocities at this speed and below are mapped to 0 m/s
+        self.median_window_size_extended = 10
+        self.low_velocity_threshold = 0.4
+        self.m_zero = 0.2  # velocities at this speed and below are mapped to 0 m/s
         self.past_5_velocity_magnitudes = None  # tracked for room anemometer, to see if we should artificially zero theta and phi for graph readability
 
         if is_duct:
@@ -278,9 +278,10 @@ class AnemometerProcessor:
             else:
                 self.add_to_strip_graph(timestamp, speed, all_temps, theta, theta_world)
                 self.speed = speed
+                self.vertical_anem = phi
+                self.vertical_world = phi_world
+
             self.temp_measured = temp
-            self.vertical_anem = phi
-            self.vertical_world = phi_world
             self._graph_medians()
 
         # Save absolute phase for reference
@@ -529,7 +530,7 @@ class AnemometerProcessor:
 
     def velocity_to_temp(self, velocity):
         # calibrated black magic
-        return (-(velocity - 331.5)/0.607+18.5)*2+24
+        return (-(velocity - 331.5)/0.607+18.5)*2+28
 
     def phase_to_velocity_temp(self, phase_ab, phase_ba, dist):
         tof_ab = phase_ab / (360 * 180000)  # khz?
@@ -544,23 +545,26 @@ class AnemometerProcessor:
 
         v_rel = -1 * (v_ab - v_ba) / 2 / np.cos(45 * np.pi / 180.)
         avg_v = (v_ab + v_ba) / 2
-        if abs(v_rel) >= 6:
-            print("v_rel > 6", phase_ab, phase_ba)
-            return 0, 0, False     # do blank instead
+        if not self.is_duct:
+            if abs(v_rel) >= 6:
+                print("v_rel > 6", phase_ab, phase_ba)
+                return 0, 0, False     # do blank instead
         # temp = + avg_v * avg_v / 400 - 273.15
         temp = self.velocity_to_temp(avg_v)
         return v_rel, temp, True
 
     # Assumes node 1 at bottom.
-    def get_directional_velocity_weights(self, w=None, v=None):
+    def get_directional_velocity_weights(self, w=None, v=None, z=None):
         sin30 = np.sin(np.pi/180 * 30)
         sin60 = np.sin(np.pi/180 * 60)
         cos_bot = np.cos(np.pi/180 * 54.74)  # Angle between top plane and bottom transducer is 54.7356 degrees, not 60
         sin_bot = np.sin(np.pi/180 * 54.74)
 
-        vx_weight = [sin30 * cos_bot, sin60, 0, cos_bot, -sin30 * cos_bot, -sin60]
-        vy_weight = [sin60 * cos_bot, sin30, 1, 0, sin60 * cos_bot, sin30]
+        vx_weight = [0, sin60, 0, 0, 0, -sin60]
+        vy_weight = [0, sin30, 1, 0, 0, sin30]
         vz_weight = [-sin_bot, 0, 0, sin_bot, sin_bot, 0]
+        # vx_weight = [sin30 * cos_bot, sin60, 0, cos_bot, -sin30 * cos_bot, -sin60]
+        # vy_weight = [sin60 * cos_bot, sin30, 1, 0, sin60 * cos_bot, sin30]
         # vx_weight = [sin30 * sin30, sin60, 0, sin30, -sin30 * sin30, -sin60]
         # vy_weight = [sin60 * sin30, sin30, 1, 0, sin60 * sin30, sin30]
         # vz_weight = [-sin60, 0, 0, sin60, sin60, 0]
@@ -570,46 +574,135 @@ class AnemometerProcessor:
         if v is not None:
             vx_weight = [sin30 * cos_bot * v, 0, 0, cos_bot * v, -sin30 * cos_bot * v, 0]
             vy_weight = [sin60 * cos_bot * v, 0, 0, 0, sin60 * cos_bot * v, 0]
+        if z is not None: 
+#            vx_weight = [sin30 * cos_bot * v * z, 0, 0, cos_bot * v * z, -sin30 * cos_bot * v * z, 0]
+#            vy_weight = [sin60 * cos_bot * v * z, 0, 0, 0, sin60 * cos_bot * v * z, 0]
+            vx_weight = [sin30 * cos_bot*z[1] , sin60 * z[0], 0, cos_bot , -sin30 * cos_bot *z[1], -sin60 * z[0]]
+            vy_weight = [sin60 * cos_bot*z[1] , sin30 * z[0], 1 * z[0], 0, sin60 * cos_bot* z[1], sin30 * z[0]]
         return vx_weight, vy_weight, vz_weight
 
     # Calculate directional velocities (vx, vy, vz) for room anemometer.
     # Weighted assuming node 1 at bottom. Path velocities must be in order
     def path_vel_to_directional_vel(self, path_vel):
-        # path_vel = self._filter_path_vel(path_vel)
-        if self.use_room_min:
-            w = 0.85
-            v = 1.1
-        else:
-            w = 0.9
-            v = 1.15    # Todo: these are placeholders
+        path_vel = self._filter_path_vel(path_vel)
         vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights()
         reweighted_w = False
-        tnx = 5  # 6 if 15degree coordinate system
-        tny = 5  # 6 if 15degree coordinate system
+        reweighted_w2 = False
+        reweighted_2 = False
+        tnx = 2  # 6 if 15degree coordinate system
+        tny = 3  # 6 if 15degree coordinate system
         tnz = []
-
+        print(path_vel[0],path_vel[1],path_vel[2],path_vel[3],path_vel[4],path_vel[5])
         # Ali's heuristic-based re-weighting
-        if 0 > abs(path_vel[1]) / path_vel[2] > -0.5 and 0 > abs(path_vel[1]) / path_vel[5] > -0.5:
-            reweighted_w = True
-            tnz = [0, 3]
-        if 0 > abs(path_vel[2]) / path_vel[1] > -0.5 and 0 < abs(path_vel[2]) / path_vel[5] < 0.5:
-            reweighted_w = True
-            tnz = [0, 4]
-        if 0 < abs(path_vel[5]) / path_vel[1] < 0.5 and 0 < abs(path_vel[5]) / path_vel[2] < 0.5:
-            reweighted_w = True
-            tnz = [3, 4]
-        if reweighted_w:
-            vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=w)
-            tnx = 2
-            tny = 3
-
-        if (0 < abs(path_vel[0] / path_vel[3]) < 0.5 and 0 < abs(path_vel[0] / path_vel[4]) < 0.5) or \
-                (0 < abs(path_vel[3] / path_vel[0]) < 0.5 and 0 < abs(path_vel[3] / path_vel[4]) < 0.5) or \
-                (0 < abs(path_vel[4] / path_vel[0]) < 0.5 and 0 < abs(path_vel[4] / path_vel[0]) < 0.5):
-            vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
-            tnx = 3
-            tny = 2
-
+        if self.use_room_min:
+            w = 0.86
+            v = 1.1
+            z = 0.95
+            z = [0.84, 1]
+            if (0 < abs(path_vel[0] / path_vel[3]) < 0.45 and 0 < abs(path_vel[0] / path_vel[4]) < 0.45):
+                reweighted_2=True;
+                v=1.4 if path_vel[3] < 0  else 1.5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
+                print("1st1 Filter")
+            if (0 < abs(path_vel[3] / path_vel[0]) < 0.3 and 0 < abs(path_vel[3] / path_vel[4]) < 0.3):
+                reweighted_2=True;
+                v=0.8 if path_vel[4] < 0  else 0.9
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
+                print("1st2 Filter")
+            if (0 < abs(path_vel[4] / path_vel[0]) < 0.4 and 0 < abs(path_vel[4] / path_vel[3]) < 0.4):
+                v=1.6 if path_vel[3] < 0  else 1.4
+                reweighted_2=True;
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
+                print("1st3 Filter")
+            if (0 > abs(path_vel[1]) / path_vel[2] > -0.3 and 0 > abs(path_vel[1]) / path_vel[5] > -.3):# and not reweighted_2:
+                tnz = [0, 3]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=0.87)
+                print("2nd1 Filter")
+            if (0 > abs(path_vel[2]) / path_vel[1] > -0.3 and 0 < abs(path_vel[2]) / path_vel[5] < .3): # and not reweighted_2:
+                tnz = [0, 4]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=0.9)
+                print("2nd2 Filter")
+            if (0 < abs(path_vel[5]) / path_vel[1] < 0.3 and 0 < abs(path_vel[5]) / path_vel[2] < .3): # and not reweighted_2:
+                tnz = [3, 4]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=0.9)
+                print("2nd3 Filter")
+            if (-0.2 > abs(path_vel[1]) / path_vel[2] > -1.1 and 0 > abs(path_vel[1]) / path_vel[5] > -1.1) or \
+                (0 > abs(path_vel[1]) / path_vel[2] > -1.1 and -0.2 > abs(path_vel[1]) / path_vel[5] > -1.1) or \
+                (0 > abs(path_vel[2]) / path_vel[1] > -1.1 and 0.2 < abs(path_vel[2]) / path_vel[5] <1.1) or \
+                (-0.2 > abs(path_vel[2]) / path_vel[1] > -1.1 and 0	 < abs(path_vel[2]) / path_vel[5] < 1.1) or \
+                (0.2 < abs(path_vel[5]) / path_vel[1] < 1.1 and 0 < abs(path_vel[5]) / path_vel[2] < 1.1) or \
+                (0 < abs(path_vel[5]) / path_vel[1] < 1.1 and 0.2 < abs(path_vel[5]) / path_vel[2] < 1.1):
+                reweighted_w2 = True
+                tnz = [3, 4]         
+            if ((0.1 < abs(path_vel[0] / path_vel[3]) < 0.8 and 0.1 < abs(path_vel[0] / path_vel[4]) < 0.8) and reweighted_w2):
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[0.8,0.85])
+                print("3rd1 Filter")
+            if (0 < abs(path_vel[3] / path_vel[0]) < 0.8 and 0 < abs(path_vel[3] / path_vel[4]) < 0.8) and reweighted_w2:
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[0.9,0.95])
+                print("3rd2 Filter")
+            if (0.2 < abs(path_vel[4] / path_vel[0]) < 0.7 and 0.2 < abs(path_vel[4] / path_vel[3]) < 0.7) and reweighted_w2:
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[0.8,0.85])
+                print("3rd3 Filter")
+        else:
+            w = 0.90 # 0.85 , 1.05	
+            v = 1.15    # Todo: these are placeholders
+            z = [0.84, 1]
+            if (0 < abs(path_vel[0] / path_vel[3]) < 0.4 and 0 < abs(path_vel[0] / path_vel[4]) < 0.4):
+                reweighted_2=True;
+                v=1.15 if path_vel[3] < 0  else 1
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
+                print("1st1 Filter")
+            if (0 < abs(path_vel[3] / path_vel[0]) < 0.4 and 0 < abs(path_vel[3] / path_vel[4]) < 0.4):
+                reweighted_2=True;
+                #v=1.15 if path_vel[3] < 0  else 1
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=1.15)
+                print("1st2 Filter")
+            if (0 < abs(path_vel[4] / path_vel[0]) < 0.4 and 0 < abs(path_vel[4] / path_vel[3]) < 0.4):
+                v=1.15 if path_vel[3] < 0  else 1.05
+                reweighted_2=True;
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(v=v)
+                print("1st3 Filter")
+            if (0 > abs(path_vel[1]) / path_vel[2] > -0.2 and 0 > abs(path_vel[1]) / path_vel[5] > -.2):# and not reweighted_2:
+                tnz = [0, 3]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=0.95)
+                print("2nd1 Filter")
+            if (0 > abs(path_vel[2]) / path_vel[1] > -0.2 and 0 < abs(path_vel[2]) / path_vel[5] < .2): # and not reweighted_2:
+                tnz = [0, 4]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=0.95)
+                print("2nd2 Filter")
+            if (0 < abs(path_vel[5]) / path_vel[1] < 0.2 and 0 < abs(path_vel[5]) / path_vel[2] < .2): # and not reweighted_2:
+                tnz = [3, 4]
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(w=1)
+                print("2nd3 Filter")
+            if (-0.2 > abs(path_vel[1]) / path_vel[2] > -1 and 0 > abs(path_vel[1]) / path_vel[5] > -1) or \
+                (0 > abs(path_vel[1]) / path_vel[2] > -1 and -0.2 > abs(path_vel[1]) / path_vel[5] > -1) or \
+                (0 > abs(path_vel[2]) / path_vel[1] > -1 and 0.2 < abs(path_vel[2]) / path_vel[5] <1) or \
+                (-0.2 > abs(path_vel[2]) / path_vel[1] > -1 and 0	 < abs(path_vel[2]) / path_vel[5] < 1) or \
+                (0.2 < abs(path_vel[5]) / path_vel[1] < 1 and 0 < abs(path_vel[5]) / path_vel[2] < 1) or \
+                (0 < abs(path_vel[5]) / path_vel[1] < 1 and 0.2 < abs(path_vel[5]) / path_vel[2] < 1):
+                reweighted_w2 = True
+                tnz = [3, 4]         
+            if ((0.1 < abs(path_vel[0] / path_vel[3]) < 0.7 and 0.1 < abs(path_vel[0] / path_vel[4]) < 0.7) and reweighted_w2):
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[0.8,0.95])
+                print("3rd1 Filter")
+            if (0.3 < abs(path_vel[3] / path_vel[0]) < 0.7 and 0.3 < abs(path_vel[3] / path_vel[4]) < 0.7) and reweighted_w2:
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[1,1])
+                print("3rd2 Filter")
+            if (0.3 < abs(path_vel[4] / path_vel[0]) < 0.7 and 0.3 < abs(path_vel[4] / path_vel[3]) < 0.7) and reweighted_w2:
+                tnx = 5
+                tny = 5
+                vx_weight, vy_weight, vz_weight = self.get_directional_velocity_weights(z=[0.75,0.9])
+                print("3rd3 Filter")
         vx = sum(sorted([i[0] / i[1] for i in zip(path_vel, vx_weight) if i[1] != 0])) / tnx
         vy = sum(sorted([i[0] / i[1] for i in zip(path_vel, vy_weight) if i[1] != 0])) / tny
         vz = sum(sorted([i[0] / i[1] for i in zip(path_vel, vz_weight) if i[1] != 0])) / 3
@@ -736,8 +829,10 @@ class AnemometerProcessor:
                     offset_from_max = -2
                 else:
                     calibrated_max_index = self._calibrated_index[(src, dst)]
-                    cur_max_index = reading.get_max_index(src, dst)
-                    offset_from_max = -2 + (calibrated_max_index - cur_max_index)
+#                    cur_max_index = reading.get_max_index(src, dst)
+                    cur_max_index = calibrated_max_index
+#                    offset_from_max = -2 + (calibrated_max_index - cur_max_index)
+                    offset_from_max = -2
                 read_index = data_len + offset_from_max - 1
                 read_indices[(src, dst)] = read_index
 
@@ -954,11 +1049,15 @@ class AnemometerProcessor:
         return filtered
 
     def _filter_magnitude(self, m):
-        if m < self.low_velocity_threshold:
-            if m <= self.m_zero:
-                m = 0
-            else:
-                m = (m - self.m_zero)/(self.low_velocity_threshold - self.m_zero) * self.low_velocity_threshold
+    #    if m < self.low_velocity_threshold*1.5:
+    #        if m < 0.2:
+    #            m=m-.11
+        if m <= self.m_zero:
+            m = 0
+        elif m < self.low_velocity_threshold:
+            m = (m - self.m_zero)/(self.low_velocity_threshold - self.m_zero) * self.low_velocity_threshold
+    #        else:
+    #            m = m - (m-1.5*self.low_velocity_threshold)/4
         return m
         # OTHER m FILTERING METHODS. Not used.
         # m calculation based on means in low windspeed

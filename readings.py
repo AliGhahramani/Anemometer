@@ -52,14 +52,15 @@ class DecodedRawInput:
     def get_rotations(self):
         # Operations in order of yaw, then pitch, then roll
         # V, the Hard-Iron vector, has placeholder values for now.
-        v = [0, 0, 0]
+        v = [-10,+110, -0] # -50,+60
         g = self.accelerometer
         b = self.magnetometer
-        roll = np.arctan2(g[1], g[2])   # eqn 13
-        pitch = np.arctan(-g[0] / (g[1] * np.sin(roll) + g[2] * np.cos(roll)))
-        yaw = np.arctan2((b[2] - v[2]) * np.sin(roll) - (b[1] - v[1]) * np.cos(roll),
-                         (b[0] - v[0]) * np.cos(pitch) + (b[1]) - v[1] * np.sin(pitch) * np.sin(roll) +
-                         (b[2] - v[2]) * np.sin(pitch) * np.cos(roll))
+        roll = np.arcsin(g[0]/np.sqrt(g[0]*g[0]+g[1]*g[1]+g[2]*g[2]))   # eqn 13
+        pitch = np.arcsin(-g[1]/np.sqrt(g[0]*g[0]+g[1]*g[1]+g[2]*g[2]))
+        yaw = np.arctan2((b[2] - v[2]) * np.sin(roll) - (b[0] - v[0]) * np.cos(roll),
+                         (b[1] - v[1]) * np.cos(pitch) + (b[0] - v[0])	 * np.sin(roll) * np.sin(pitch) +
+                         (b[2] - v[2]) * np.cos(roll) * np.sin(pitch))
+        print(yaw)
         return roll, pitch, yaw
 
     # Returns change of coordinates matrix R from world space to anemometer space, s.t. v_anem = R * v_world
