@@ -2,13 +2,14 @@ from __future__ import unicode_literals
 
 from collections import deque, defaultdict
 import numpy as np
+import pickle
 from anemUIWindow import *
 
 
 # Processes input as streamed in by anemUI.py, and spawns a UI thread for this anemometer
 class AnemometerProcessor:
     def __init__(self, anemometer_id, is_duct, data_dump_func, calibration_period,
-                 include_calibration=False, use_room_min=True, duct_dist=0.0454):
+                 include_calibration=False, use_room_min=True, duct_dist=0.0454, use_saved_calibration=False):
         self.anemometer_id = anemometer_id
         self.is_duct = is_duct
         self.data_dump_func = data_dump_func
@@ -16,9 +17,9 @@ class AnemometerProcessor:
         self.include_calibration = include_calibration
         self.use_room_min = use_room_min
         self.duct_distance = duct_dist
-
+        self.use_saved_calibration = use_saved_calibration
         self.algorithm = 1  # 0: phase only. 1: Temperature guided\
-        self.is_calibrating = True
+
         self.aw = None
         self.start_time = time.time()
         self.paths = []
@@ -61,14 +62,16 @@ class AnemometerProcessor:
         self.temp_med = 0
         self.speed_med = 0
 
-
         if self.algorithm is 0:
             self._prev_rel_phase = {}  # {(src, dst) : number}
             self._prev_abs_phase = {}  # {(src, dst) : number}
             self._cur_abs_phase = {}  # {(src, dst) : number}
         else:
             self._prev_abs_phase = {}
+
         self.start_calibration()
+        if self.use_saved_calibration:
+            self._read_saved_calibration()
 
         # Added by Yannan
         self.past_5_counter = [0, 0, 0, 0, 0, 0]
@@ -763,7 +766,6 @@ class AnemometerProcessor:
             print("Warning: couldn't invert anemometer rotation matrix.")
             return 0, 0, 0
 
-
     def add_to_general_graph(self, point, index, is_blank=False):
         if not is_blank:
             self.general_graph_buffer[index].append(point)
@@ -813,6 +815,46 @@ class AnemometerProcessor:
         return self.median_window_size
 
     # ================HELPER FUNCTIONS=================
+
+    # Reads serialized data from pickle file, if it exists. Returns True if reading has been successful.
+    def _read_saved_calibration(self):
+        try:
+            pickle_file = open(resource_path(self.anemometer_id + ".pickle"), 'rb')
+        except FileNotFoundError:
+            print("Could not find existing calibration file. Recalibrating")
+            return False
+        except IOError:
+            print("Could not open calibration file. Recalibrating")
+            return False
+
+        # Load data, and make sure meta parameters match
+        try:
+            pickle_data = pickle.load(pickle_file)
+        except (IOError, EOFError):
+            # On error, reset data and report failure.
+            self.start_calibration()
+            print("Error while reading calibration data. Recalibrating.")
+            return False
+
+        if pickle_data["is_duct"] != self.is_duct:
+            print("Saved calibration data for anemometer id " + self.anemometer_id +
+                  " does not match current anemometer type! Saved is_duct: " + pickle_data["is_duct"] +
+                  ". Recalibrating.")
+            return False
+        elif pickle_data["algorithm"] != self.algorithm:
+            print("Saved calibration data for anemometer id " + self.anemometer_id +
+                  " does not match current algorithm! Saved algorithm: " + pickle_data["algorithm"] +
+                  ". Recalibrating.")
+            return False
+
+        # Read in previous calibration data.
+        self._calibration_phases = pickle_data["calibration_phases"]
+        self._calibration_indices = pickle_data["calibration_indices"]
+        if self.algorithm is 1:
+            self._calibration_temperatures = pickle_data["calibration_temperatures"]
+
+        print("Successfully loaded saved calibration")
+        return True
 
     # Returns map of (src, dst) to absolute phase from reading, as well as read index.
     def _get_abs_phase(self, reading, default_phase=None):
@@ -974,11 +1016,19 @@ class AnemometerProcessor:
 
     def _finish_calibration(self, calibration_phases=None, calibration_indices=None, calibration_temperatures=None):
         self.is_calibrating = False
+        pickle_data = {"is_duct": self.is_duct, "algorithm": self.algorithm}
         calibrated_phases = {}
         calibrated_indices = {}
         calibrated_temp = 0
+        # Temporary workaround of a bug where one extra reading is always saved to calibration after calibration period.
+        # Necessary to halt continual increase in calibration data saved.
+        # Todo: refactor this weirdness so that calibration end checks come before reading processing.
+        calibration_phases = {path: phases[:self.calibration_period] for (path, phases) in calibration_phases.items()}
+        calibration_indices = {path: indices[:self.calibration_period] for (path, indices) in calibration_indices.items()}
+        calibration_temperatures = calibration_temperatures[:self.calibration_period]
 
         if calibration_phases is not None:
+            pickle_data["calibration_phases"] = calibration_phases
             for (src, dst), phase_list in calibration_phases.items():
                 # make the phase list continuous. Ex: 170, -150, -130 -> 170, 210, 230
                 for i in range(1, len(phase_list)):
@@ -990,6 +1040,7 @@ class AnemometerProcessor:
                 calibrated_phases[(src, dst)] = np.median(phase_list)
 
         if calibration_indices is not None:
+            pickle_data["calibration_indices"] = calibration_indices
             for (src, dst), index_list in calibration_indices.items():
                 index_list = [i for i in index_list if i >= 0]  # ignore all invalid indices
                 index_mode = 0
@@ -999,9 +1050,16 @@ class AnemometerProcessor:
                 print(self.anemometer_id, "index[", (src, dst), "] = ", index_list, ", mode =", index_mode)
 
         if calibration_temperatures is not None:
+            pickle_data["calibration_temperatures"] = calibration_temperatures
             # calibrated_temp = mean_within_sd(calibration_temperatures, 2)
             calibrated_temp = np.median(calibration_temperatures)
 
+        try:
+            pickle_file = open(resource_path(self.anemometer_id + ".pickle"), 'wb')
+            pickle.dump(pickle_data, pickle_file)
+        except IOError:
+            print("Failed to save calibration values!")
+        print("Succcessfully finished calibration, and saved calibration data to " + self.anemometer_id + ".pickle")
         return calibrated_phases, calibrated_indices, calibrated_temp
 
     # Begin added by Yannan
@@ -1108,8 +1166,6 @@ def closest_rotation(x, y):
     if d > 180:
         d -= 360
     return d
-
-    # Completes calibration and returns the calibrated phase and index
 
 
 def mean(numbers):

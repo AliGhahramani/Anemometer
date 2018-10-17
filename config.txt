@@ -2,5 +2,6 @@ site: site1
 USBport: None
 duct distance: 0.0454
 room min
+use saved calibration: false
 
 1c5168930634658d room
