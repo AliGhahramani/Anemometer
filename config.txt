@@ -1,7 +1,19 @@
-site: site1
-USBport: None
-duct distance: 0.0454
-room min
-use saved calibration: false
+site: site89
 
-1c5168930634658d room
+USBport: COM24
+
+duct distance: 0.05
+
+room min
+
+use saved calibration: false	
+
+usblocal room
+
+numsensor 4
+
+mag -10 95 -165
+
+keep_raw_data? y
+
+

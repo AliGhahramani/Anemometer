@@ -1,7 +1,10 @@
 from datetime import datetime
 import numpy as np
-
+import anemUI as anemUI
+import anemUIWindow as aw
+v = []
 squelch = False  # True if you want to squelch warning messages. (TODO: There's probably a nicer way to do this.)
+
 class DecodedChirpHeader:
     def __init__(self, id, max_indices, real, imaginary):
         self.id = id
@@ -9,9 +12,10 @@ class DecodedChirpHeader:
         self.real = real  # list of lists
         self.imaginary = imaginary  # list of lists
 
+
 class DecodedRawInput:
     def __init__(self,  anemometer_id="", timestamp=0, site="", is_duct=False, is_duct6=False, is_room=False,
-                 temperature=0, accelerometer=None, magnetometer=None, num_sensors=4, chirp_headers=None):
+                 temperature=0, accelerometer=None, magnetometer=None, num_sensors=6, chirp_headers=None):
         if chirp_headers is None:
             chirp_headers = []
         self.anemometer_id = anemometer_id
@@ -20,7 +24,19 @@ class DecodedRawInput:
         self.is_duct = is_duct
         self.is_duct6 = is_duct6
         self.is_room = is_room
-        self.num_sensors = num_sensors
+        
+        if is_duct6== True:
+            self.num_sensors = 6
+            anemUI.num_sensors =6
+            aw.num_sensors=6
+            is_duct == True
+        else:
+            self.num_sensors = 4
+            anemUI.num_sensors =4
+            aw.num_sensors=4
+            
+            
+            
         self.chirp_headers = chirp_headers
         self.temperature = temperature
         self.accelerometer = accelerometer
@@ -46,27 +62,69 @@ class DecodedRawInput:
 
     def get_magnetometer(self):
         return self.magnetometer
+    
+    def get_num_sensor(self):
+        return self.num_sensors
+    
 
     # Uses accelerometer and magnetometer values to determine roll, pitch, and yaw of anemometer in radians
     # see paper: https://www.nxp.com/files-static/sensors/doc/app_note/AN4248.pdf
     def get_rotations(self):
         # Operations in order of yaw, then pitch, then roll
         # V, the Hard-Iron vector, has placeholder values for now.
-        v = [-10,+110, -0] # -50,+60
+#        v = [-10,+110, -0] # -50,+60
+#        v = [-10,110,0] # -50,+60
+#        print("Hard-iron coeffients from config.txt", v)
+        
+#        yaw_bias =[0,90,160,180,-138]
+#        soft_yaw =[[1.2857,-25.714],[1,-340],[0.678,-3.2203],[1.667,140],[0.8738,8.7379]]
+        
         g = self.accelerometer
         b = self.magnetometer
+        aw.mag=b
+        
         roll = np.arcsin(g[0]/np.sqrt(g[0]*g[0]+g[1]*g[1]+g[2]*g[2]))   # eqn 13
         pitch = np.arcsin(-g[1]/np.sqrt(g[0]*g[0]+g[1]*g[1]+g[2]*g[2]))
-        yaw = np.arctan2((b[2] - v[2]) * np.sin(roll) - (b[0] - v[0]) * np.cos(roll),
-                         (b[1] - v[1]) * np.cos(pitch) + (b[0] - v[0])	 * np.sin(roll) * np.sin(pitch) +
+        temp_yaw = np.arctan2((b[2] - v[2]) * np.sin(roll) - (b[0] - v[0]) * np.cos(roll),
+                         (b[1] - v[1]) * np.cos(pitch) + (b[0] - v[0])* np.sin(roll) * np.sin(pitch) +
                          (b[2] - v[2]) * np.cos(roll) * np.sin(pitch))
-        print(yaw)
+
+#        pitch = 180 * np.arctan2(g[0], np.sqrt(g[1]*g[1] + g[2]*g[2]))/np.pi;
+#        roll =  180 * np.arctan2(g[1], np.sqrt(g[0]*g[0] + g[2]*g[2]))/np.pi;
+#
+#        mag_x = b[0]*np.cos(pitch) + b[1]*np.sin(roll)*np.sin(pitch) + b[2]*np.cos(roll)*np.sin(pitch)
+#        mag_y = b[1] * np.cos(roll) - b[2] * np.sin(roll)
+#        yaw = 180 * np.arctan2(-mag_y,mag_x)/np.pi;
+
+        yaw = temp_yaw        
+#        if temp_yaw>=90 and temp_yaw < 160:
+#            yaw = temp_yaw * soft_yaw[0][0] + soft_yaw[0][1]           
+#        if temp_yaw>=160 and temp_yaw < 180:
+#            yaw = temp_yaw * soft_yaw[1][0] + soft_yaw[1][1]            
+#        if temp_yaw>=-138 and temp_yaw <-10:
+#            yaw = temp_yaw * soft_yaw[2][0] + soft_yaw[2][1]  
+#        if temp_yaw>=-180 and temp_yaw <-138:
+#            yaw = temp_yaw * soft_yaw[3][0] + soft_yaw[3][1]                        
+
+
+
+#        with open("Debug_data.txt", 'a') as f:
+#            f.write(str( yaw)+'\n' )   
+#            f.flush()
+        
+#        print('-Line 64 in readings.py--roll, pitch, yaw -----',roll, pitch, yaw)
+        
+
         return roll, pitch, yaw
 
     # Returns change of coordinates matrix R from world space to anemometer space, s.t. v_anem = R * v_world
     def get_rotation_matrix(self):
+        
         roll, pitch, yaw = self.get_rotations()
-        # v_anem = Rx * Ry * Rz * v_world
+        aw.show_pitch=pitch
+        aw.show_yaw= yaw
+
+#        # v_anem = Rx * Ry * Rz * v_world
         r_x = np.matrix([[1, 0, 0],
                          [0, np.cos(roll), np.sin(roll)],
                          [0, -np.sin(roll), np.cos(roll)]])
@@ -76,6 +134,7 @@ class DecodedRawInput:
         r_z = np.matrix([[np.cos(yaw), np.sin(yaw), 0],
                          [-np.sin(yaw), np.cos(yaw), 0],
                          [0, 0, 1]])
+    
         return np.dot(r_x, np.dot(r_y, r_z))
 
 # old implementation

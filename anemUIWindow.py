@@ -2,17 +2,55 @@
 
 from __future__ import unicode_literals
 import matplotlib
+import readings as readings
 # Make sure that we are using QT5
 matplotlib.use('Qt5Agg')
 from PyQt5 import QtCore, QtWidgets
+from PyQt5.QtWidgets import QLabel, QMainWindow, QApplication, QWidget, QVBoxLayout,QFileDialog
+from PyQt5.QtGui import QPixmap
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.animation as animation
 import matplotlib.ticker as ticker
-import time, os, threading
+import time, os, threading,sys
 import numpy as np
+from threading import Thread
+from datetime import datetime,timedelta
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 GRAPH_MAX_X_WINDOW = 200
+
+show_roll =0
+show_pitch =0
+show_yaw =0
+num_sensors=0
+mag=[0, 0, 0]
+config_keep_rawdata_button='y'
+example_size=0
+dump_file_index = 1
+dump_size =0
+#current_time = str(datetime.now().strftime("%m-%d-%Y"))
+#current_time = str(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+current_time = datetime.now()
+
+class WM(QtWidgets.QMainWindow):
+
+    def __init__(self, parent=None):
+        super(WM, self).__init__(parent)
+        QtCore.QTimer.singleShot(5000, self.close)
+        self.setWindowFlags(QtCore.Qt.FramelessWindowHint)
+        self.setWindowTitle('Ultrosonic Wind Speed Meter...')
+
+        self.central_widget = QWidget()               
+        self.setCentralWidget(self.central_widget)    
+        lay = QVBoxLayout(self.central_widget)
+
+        label = QLabel(self)
+        pixmap = QPixmap('w1.png')
+        label.setPixmap(pixmap)
+        self.resize(pixmap.width(), pixmap.height())
+        lay.addWidget(label)
 
 
 class MultipleApplicationWindows(QtWidgets.QMainWindow):
@@ -31,13 +69,16 @@ class MultipleApplicationWindows(QtWidgets.QMainWindow):
 class ApplicationWindow(QtWidgets.QDialog):
     is_duct = True
     anemometer_id = ""
-
+    
     def __init__(self, parent, anem_processor_owner, is_duct, anemometer_id, paths):
+ 
         QtWidgets.QDialog.__init__(self, parent)
+      
         self.anem_processor_owner = anem_processor_owner  # owning AnemometerProcessor object from which to fetch stream
         self.is_duct = is_duct
         self.anemometer_id = anemometer_id
         self.paths = paths
+        self.num_sensors = num_sensors
 
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
         self.setWindowTitle("Anemometer " + str(anemometer_id))
@@ -53,36 +94,65 @@ class ApplicationWindow(QtWidgets.QDialog):
 
         self.tabs.addTab(self.tab1, "Main")
         self.tabs.addTab(self.tab2, "Diagnostic")
+#        self.tabs.setStyleSheet('background-color: grey;')
         self.set_up_main_tab()
         self.set_up_diagnostic_tab()
 
+    
+
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(self.tabs)
+
 
         # Set up settings bar
-        self.median_window_textbox = QtWidgets.QLineEdit(self)
-        self.median_window_textbox.setText('5')  # default median window size is 5
-        self.median_window_textbox.setMaxLength(2)
-        self.median_window_label = QtWidgets.QLabel('Median window size', self)
-        self.median_window_button = QtWidgets.QPushButton('Set', self)
-        self.median_window_button.clicked.connect(self.on_set_median_window_click)
+#        self.median_window_textbox = QtWidgets.QLineEdit(self)
+#        self.median_window_textbox.setText('5')  # default median window size is 5
+#        self.median_window_textbox.setMaxLength(2)
+#        self.median_window_label = QtWidgets.QLabel('Median window size', self)
+#        self.median_window_button = QtWidgets.QPushButton('Set', self)
+#        self.median_window_button.clicked.connect(self.on_set_median_window_click)
         self.recalibrate_button = QtWidgets.QPushButton('Recalibrate', self)
         self.recalibrate_button.clicked.connect(self.on_recalibrate_click)
-
-        settings_layout = QtWidgets.QHBoxLayout(self)
-        settings_layout.addWidget(self.median_window_label)
-        settings_layout.addWidget(self.median_window_textbox)
-        settings_layout.addWidget(self.median_window_button)
+        
+        self.exit_button = QtWidgets.QPushButton('Exit', self)
+        self.exit_button.clicked.connect(self.on_exit_button_click)        
+        
+        self.spin_ws_label = QtWidgets.QLabel(' Median filter size ')
+        self.spin_ws = QtWidgets.QSpinBox() 
+        self.spin_ws.setRange(1,30)
+        self.spin_ws.setValue(5)
+        
+        self.spin_ws.valueChanged.connect(self.on_spin_median_window_click)
+        settings_layout = QtWidgets.QHBoxLayout()
+#        settings_layout.addWidget(self.median_window_label)
+#        settings_layout.addWidget(self.median_window_textbox)
+#        settings_layout.addWidget(self.median_window_button)
+        
+        settings_layout.addWidget(self.spin_ws_label)      
+        settings_layout.addWidget(self.spin_ws)   
+        
         settings_layout.addStretch(1)
+
+
         settings_layout.addWidget(self.recalibrate_button)
+        
+        settings_layout.addStretch(1)
+        settings_layout.addWidget(self.exit_button)
+        layout.addWidget(self.tabs)        
         layout.addLayout(settings_layout)
+        
 
         self.main_widget.setFocus()
+        self.move(150,0)
+        self.resize(1600,880)
+        
+       
+        
+        
         # self.setCentralWidget(self.main_widget)
         # if self.anem_processor_owner.is_calibrating:
         #     self.statusBar().showMessage("CALIBRATING. Please wait")
 
-        print("CREATED WINDOW " + self.anemometer_id)
+#        print("CREATED WINDOW " + self.anemometer_id)
 
     def set_up_main_tab(self):
         # Create main tab layout
@@ -109,14 +179,26 @@ class ApplicationWindow(QtWidgets.QDialog):
         header_l.addWidget(self.temp_label, 1)
         if not self.is_duct:
             header_dir_l = QtWidgets.QGridLayout()
-            self.azimuth_world_label = QtWidgets.QLabel('earth azimuth: 0 °')
-            self.vertical_world_label = QtWidgets.QLabel('earth vertical: 0 °')
-            self.azimuth_anem_label = QtWidgets.QLabel('anemometer azimuth: 0 °')
-            self.vertical_anem_label = QtWidgets.QLabel('anemometer vertical: 0 °')
-            header_dir_l.addWidget(self.azimuth_world_label, 0, 0)
-            header_dir_l.addWidget(self.vertical_world_label, 0, 1)
-            header_dir_l.addWidget(self.azimuth_anem_label, 1, 0)
-            header_dir_l.addWidget(self.vertical_anem_label, 1, 1)
+#            self.azimuth_world_label = QtWidgets.QLabel('earth azimuth: 0 °')
+#            self.vertical_world_label = QtWidgets.QLabel('earth vertical: 0 °')
+#            self.azimuth_anem_label = QtWidgets.QLabel('anemometer azimuth: 0 °')
+#            self.vertical_anem_label = QtWidgets.QLabel('anemometer vertical: 0 °')
+            
+            self.compassorien_anem_lable = QtWidgets.QLabel('anemometer compass orientation: 0 °')
+            self.azimuth_world_label = QtWidgets.QLabel('earth wind azimuth: 0 °')
+            self.azimuth_anem_label = QtWidgets.QLabel('anemometer wind azimuth: 0 °')
+
+            self.tilt_anem_label = QtWidgets.QLabel('anemometer tilt: 0 °')
+            self.vertical_world_label = QtWidgets.QLabel('earth wind vertical declination: 0 °')
+            self.vertical_anem_label = QtWidgets.QLabel('anemometer wind vertical declination: 0 °')
+  
+            header_dir_l.addWidget(self.compassorien_anem_lable, 0, 0)    
+            header_dir_l.addWidget(self.azimuth_world_label, 1, 0)
+            header_dir_l.addWidget(self.azimuth_anem_label, 2, 0)
+            
+            header_dir_l.addWidget(self.tilt_anem_label, 0, 1)
+            header_dir_l.addWidget(self.vertical_world_label, 1, 1)
+            header_dir_l.addWidget(self.vertical_anem_label, 2, 1)
             header_l.addLayout(header_dir_l, 2)
         header_l.addWidget(self.window_label, 1)
         l1.addLayout(header_l)
@@ -143,26 +225,55 @@ class ApplicationWindow(QtWidgets.QDialog):
     def set_up_diagnostic_tab(self):
         # Create diagnostic tab layout
         l2 = QtWidgets.QGridLayout(self.tab2)
+        self.mag_lable = QtWidgets.QLabel('mag:')
+        self.small_font = self.mag_lable.font()
+        self.big_font = self.mag_lable.font()
+        self.big_font.setPointSize(self.small_font.pointSize() + 5)
+        self.mag_lable.setFont(self.big_font)
+        
+        
+        
+        
         # Add buttons
         self.debug_toggle_button = QtWidgets.QPushButton('TOGGLE DEBUG', self)
         self.debug_toggle_button.setToolTip('toggle between normal mode (velocities) and debug mode (relative phases)')
         self.debug_toggle_button.clicked.connect(self.on_toggle_click)
         self.is_debug = False
+        
         self.dump_data_button = QtWidgets.QPushButton('SAVE RAW DATA', self)
         self.dump_data_button.setToolTip('save all raw data to anemometer_raw_data.txt')
         self.dump_data_button.clicked.connect(self.on_dump_raw_data_click)
+                
         self.dump_graph_button = QtWidgets.QPushButton('SAVE GRAPH DATA', self)
         self.dump_graph_button.setToolTip('save all data shown on graph to anemometer_graph_data_' +
                                           str(self.anemometer_id) + '.tsv')
         self.dump_graph_button.clicked.connect(self.on_dump_graph_data_click)
-        l2.addWidget(self.debug_toggle_button, 0, 0)
-        l2.addWidget(self.dump_data_button, 1, 0)
-        l2.addWidget(self.dump_graph_button, 2, 0)
+
+#        self.dump_example_button = QtWidgets.QPushButton('SAVE EXAMPLE DATA', self)
+#        self.dump_example_button.setToolTip('save all graph data to example file.txt')
+#        self.dump_example_button.clicked.connect(self.on_dump_example_data_click)
+
+        if config_keep_rawdata_button == 'n':
+            self.dump_data_button.setEnabled(False)
+#            self.dump_graph_button.setEnabled(False)
+            
+        l2.addWidget(self.mag_lable, 0, 0)
+
+        l2.addWidget(self.debug_toggle_button, 1, 0)
+        l2.addWidget(self.dump_data_button, 2, 0)
+        l2.addWidget(self.dump_graph_button, 3, 0)
+#        l2.addWidget(self.dump_example_button, 4, 0)
+
+        t1 = threading.Thread(target=self._update_diagnostic_tab_header)
+        t1.daemon = True
+        t1.start()          
+      
 
         # Add graphs
         # TODO: Probably do this with subplots instead of multiple plots..
         self.toggle_graphs = []
         self.general_graphs = []
+
         for i in range(len(self.paths)):
             g = ToggleableGraph(self, self.anem_processor_owner, self.paths, i, self.main_widget, width=5, height=4,
                                 dpi=100)
@@ -176,7 +287,9 @@ class ApplicationWindow(QtWidgets.QDialog):
                 g = GeneralGraph(self, self.anem_processor_owner, i, self.main_widget, width=5, height=4, dpi=100,
                                  title="Temp on path " + path_str, ylabel="temperature (C)", yrange=(21, 25))
                 self.general_graphs.append(g)
-                l2.addWidget(g, 2 + i % 2, i // 2 + 1)
+                l2.addWidget(g, 2 + i % 2, i // 2 + 1)           
+                             
+                
         else:
             # Graphs for vx, vy, vz, m, theta, phi
             vx = GeneralGraph(self, self.anem_processor_owner, 0, self.main_widget, width=5, height=4, dpi=100)
@@ -198,8 +311,14 @@ class ApplicationWindow(QtWidgets.QDialog):
             l2.addWidget(theta, 3, 2)
             l2.addWidget(phi, 3, 3)
 
-    def fileQuit(self):
+    def on_exit_button_click(self):
+       
         self.close()
+        
+    def fileQuit(self):
+      
+        self.close()
+
 
     def closeEvent(self, ce):
         self.fileQuit()
@@ -219,22 +338,27 @@ class ApplicationWindow(QtWidgets.QDialog):
             return
         if self.anem_processor_owner.median_window_size != new_median_window_size:
             self.anem_processor_owner.median_window_size = new_median_window_size
-            for graph in self.toggle_graphs:
-                graph.update_median(new_median_window_size)
-            for graph in self.general_graphs:
-                graph.update_median(new_median_window_size)
-            self.strip_graphs.update_median(new_median_window_size)
-
+            
+    def on_spin_median_window_click(self):
+        new_median_window_size = int(self.spin_ws.value())   
+        if self.anem_processor_owner.median_window_size != new_median_window_size:
+            self.anem_processor_owner.median_window_size = new_median_window_size
+        
+        
     def on_recalibrate_click(self):
         self.anem_processor_owner.start_calibration()
 
+        
+
     def on_dump_graph_data_click(self):
+
         filename = 'anemometer_graph_data_' + str(self.anemometer_id) + '.tsv'
         print("Attempting to save data to " + filename)
         f = open(resource_path(filename), 'w')
-
         # write column labels
-        f.write("time since start")
+        f.write("month/day/year/time")
+        f.write("\t"+" time since start")
+
         for graph in self.toggle_graphs:
             f.write("\t" + str(graph.data_label()))
         for graph in self.general_graphs:
@@ -243,7 +367,9 @@ class ApplicationWindow(QtWidgets.QDialog):
 
         # write all data lines
         for i in range(len(self.toggle_graphs[0].xdata)):
-            f.write(str(self.toggle_graphs[0].xdata[i]))  # time since start
+                        
+            f.write(str(current_time + timedelta(seconds = self.toggle_graphs[0].xdata[i])))                
+            f.write("\t" +str(self.toggle_graphs[0].xdata[i]))  # time since start
             for graph in self.toggle_graphs:
                 if i < len(graph.ydata_vel):
                     f.write("\t" + str(graph.ydata_vel[i]))
@@ -255,6 +381,102 @@ class ApplicationWindow(QtWidgets.QDialog):
         f.close()
         print("Successfully saved data to " + filename)
 
+    def auto_dump_data(self):
+
+                filename = "graph_data_"+  '.tsv'
+                print("Attempting to save data to " + filename)
+                f = open(resource_path(filename), 'w')
+                # write column labels
+                f.write("month/day/year/time")
+                f.write("\t"+" time since start")
+        
+                for graph in self.toggle_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                for graph in self.general_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                f.write("\n")
+        
+                # write all data lines
+                for i in range(len(self.toggle_graphs[0].xdata)):
+                    f.write(current_time)
+                    f.write("\t" +str(self.toggle_graphs[0].xdata[i]))  # time since start
+                    for graph in self.toggle_graphs:
+                        if i < len(graph.ydata_vel):
+                            f.write("\t" + str(graph.ydata_vel[i]))
+                    for graph in self.general_graphs:
+                        if i < len(graph.ydata):
+                            f.write("\t" + str(graph.ydata[i]))
+                    f.write("\n")
+                
+                dump_file_index +=1
+             
+
+
+    def on_dump_example_data_click(self):
+        filename=""
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
+        filename, _ = QFileDialog.getSaveFileName(self,"QFileDialog.getSaveFileName()","Example_1.tsv","tsv Files(*.tsv);;All Files (*);;Text Files (*.txt)", options=options)
+        if filename:
+#            filename = 'Example_' + str(self.anemometer_id) + '.tsv'
+            dump_size=len(self.toggle_graphs[0].xdata)
+#            example_save_size=int(example_size*0.0039)
+            example_save_size=int(example_size)
+            print("_____example_save_size",example_save_size)
+            if dump_size>example_save_size:
+                             
+                print("Attempting to save data to " + filename)
+                f = open(resource_path(filename), 'w')
+                # write column labels
+                f.write("month/day/year/time")
+                f.write("\t"+" time since start")
+        
+                for graph in self.toggle_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                for graph in self.general_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                f.write("\n")
+        
+                # write all data lines
+                for i in range(len(self.toggle_graphs[0].xdata)-example_save_size,len(self.toggle_graphs[0].xdata)):
+                    f.write(current_time)
+                    f.write("\t" +str(self.toggle_graphs[0].xdata[i]))  # time since start
+                    for graph in self.toggle_graphs:
+                        if i < len(graph.ydata_vel):
+                            f.write("\t" + str(graph.ydata_vel[i]))
+                    for graph in self.general_graphs:
+                        if i < len(graph.ydata):
+                            f.write("\t" + str(graph.ydata[i]))
+                    f.write("\n")
+            else:
+#                filename = 'anemometer_example_data_' + str(self.anemometer_id) + '.tsv'
+                print("Attempting to save data to " + filename)
+                f = open(resource_path(filename), 'w')
+                # write column labels
+                f.write("month/day/year/time")
+                f.write("\t"+" time since start")
+        
+                for graph in self.toggle_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                for graph in self.general_graphs:
+                    f.write("\t" + str(graph.data_label()))
+                f.write("\n")
+        
+                # write all data lines
+                for i in range(len(self.toggle_graphs[0].xdata)):
+                    f.write(current_time)
+                    f.write("\t" +str(self.toggle_graphs[0].xdata[i]))  # time since start
+                    for graph in self.toggle_graphs:
+                        if i < len(graph.ydata_vel):
+                            f.write("\t" + str(graph.ydata_vel[i]))
+                    for graph in self.general_graphs:
+                        if i < len(graph.ydata):
+                            f.write("\t" + str(graph.ydata[i]))
+                    f.write("\n")
+            f.close()
+            print("Successfully saved data to " + filename)
+
+
     def _update_main_tab_header(self):
         while True:
             speed = self.anem_processor_owner.get_speed()
@@ -264,6 +486,8 @@ class ApplicationWindow(QtWidgets.QDialog):
             vertical_anem = self.anem_processor_owner.get_vertical_anemometer()
             vertical_world = self.anem_processor_owner.get_vertical_world()
             window = self.anem_processor_owner.get_averaging_window()
+            
+            
             self.set_main_tab_header(speed, temp, window, radial_anem, vertical_anem,
                                      radial_world, vertical_world)
             time.sleep(1)
@@ -271,17 +495,31 @@ class ApplicationWindow(QtWidgets.QDialog):
     def set_main_tab_header(self, speed, temp, averaging_window, azimuth_anemometer=None, vertical_anemometer=None, azimuth_world=None, vertical_world=None):
         self.speed_label.setText(strformat_double(speed) + " m/s")
         self.temp_label.setText(strformat_double(temp) + " °C")
-        self.window_label.setText("averaging over " + str(averaging_window) + " readings")
-
+        self.window_label.setText("averaging over " + str(averaging_window) + " readings")       
+        if show_yaw is not None and not self.is_duct:
+            self.compassorien_anem_lable.setText("anemometer compass orientation: " + strformat_double(180*show_yaw/3.1415926) + " °")  
+        if show_pitch is not None and not self.is_duct:
+            self.tilt_anem_label.setText("anemometer tilt: " + strformat_double(180*show_pitch/3.1415926) + " °")
+        
         if azimuth_anemometer is not None and not self.is_duct:
-            self.azimuth_anem_label.setText("anemometer azimuth: " + strformat_double(azimuth_anemometer) + " °")
+            self.azimuth_anem_label.setText("anemometer wind azimuth: " + strformat_double(azimuth_anemometer) + " °")
         if vertical_anemometer is not None and not self.is_duct:
-            self.vertical_anem_label.setText("anemometer vertical: " + strformat_double(vertical_anemometer) + " °")
+            self.vertical_anem_label.setText("anemometer wind vertical declination: " + strformat_double(vertical_anemometer) + " °")
         if azimuth_world is not None and not self.is_duct:
-            self.azimuth_world_label.setText("earth azimuth: " + strformat_double(azimuth_world) + " °")
+            self.azimuth_world_label.setText("earth wind azimuth: " + strformat_double(azimuth_world) + " °")
         if vertical_world is not None and not self.is_duct:
-            self.vertical_world_label.setText("earth vertical: " + strformat_double(vertical_world) + " °")
+            self.vertical_world_label.setText("earth wind vertical declination: " + strformat_double(vertical_world) + " °")
 
+    def _update_diagnostic_tab_header(self):
+        while True:
+            self.set_diagnostic_tab_header(mag)  
+#
+            time.sleep(1)
+            
+    def set_diagnostic_tab_header(self, mag=None):
+        if mag is not None and not self.is_duct:
+            self.mag_lable.setText("  mag:" + "\n\n"+str("{:10.2f}".format(mag[0])) + "\n"+ str("{:10.2f}".format(mag[1]))+"\n"+str("{:10.2f}".format(mag[2])))
+       
 
 class StripGraphs(FigureCanvas):
     # Initialize a set of strip graphs using subplots that pull from strip_graph_buffer
@@ -329,7 +567,7 @@ class StripGraphs(FigureCanvas):
         self.xdata_blank = [[] for _ in range(self.num_graphs)]
         self.ydata_blank = [[] for _ in range(self.num_graphs)]
         self.ymin = [0 for _ in range(self.num_graphs)]
-        self.ymax = [0 for _ in range(self.num_graphs)]
+        self.ymax = [0.001 for _ in range(self.num_graphs)]
         self.ymin_index = [(0, 0) for _ in range(self.num_graphs)]     # each tuple is (x value, index at min y point)
         self.ymax_index = [(0, 0) for _ in range(self.num_graphs)]
         self.ln = [None for _ in range(self.num_graphs)]
@@ -358,6 +596,9 @@ class StripGraphs(FigureCanvas):
         return self.title
 
     def compute_initial_figure(self):
+ 
+        self.main_grap_line=9
+               
         for i in range(self.num_graphs):
             if not self.is_duct:
                 # 2 lines per graph: one for raw data, one for medians
@@ -368,21 +609,83 @@ class StripGraphs(FigureCanvas):
                 self.ln_med[i] = ln_med
                 self.ln_blank[i] = ln_blank
             else:
-                # 8 lines per graph: 4 for raw data, 4 for medians
-                colors = ['red', 'green', 'cyan', 'blue']
-                self.ln[i] = []
-                self.ln_med[i] = []
-                self.ln_blank[i] = []
-                self.ydata[i] = [[] for _ in range(4)]
-                self.ydata_med[i] = [[] for _ in range(4)]
-                self.ydata_blank[i] = [[] for _ in range(4)]
-                for j in range(4):
-                    ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
-                    ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
-                    ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i][j], 'o', markersize=1, color='gray')
-                    self.ln[i].append(ln)
-                    self.ln_med[i].append(ln_med)
-                    self.ln_blank[i].append(ln_blank)
+                if num_sensors==4:
+                    # 8 lines per graph: 4 for raw data, 4 for medians
+                    _path = [(3, 1), (0, 1), (0, 2), (3, 2)] 
+                    colors = ['red', 'green', 'cyan', 'blue']
+                    self.ln[i] = []
+                    self.ln_med[i] = []
+                    self.ln_blank[i] = []
+                    self.ydata[i] = [[] for _ in range(4)]
+                    self.ydata_med[i] = [[] for _ in range(4)]
+                    self.ydata_blank[i] = [[] for _ in range(4)]
+                    path_str=[]
+                    for j in range(4):
+                        temp_path_str = 'Path '+str(_path[j][0]) + " to " + str(_path[j][1])
+                        path_str.append(temp_path_str)
+                        
+                    legend_elements=[Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[0], markersize=10, label=path_str[0]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[1], markersize=10, label=path_str[1]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[2], markersize=10, label=path_str[2]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[3], markersize=10, label=path_str[3])]
+                    
+                    self.axes[i].legend(handles=legend_elements, loc='upper center', ncol=9, columnspacing=2, bbox_to_anchor=(0.5, 1.083), fancybox=True, shadow=True)
+                    
+               
+                    for j in range(4):
+                        path_str = 'Path '+str(_path[j][0]) + " to " + str(_path[j][1])
+                        ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
+        #                ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=3, color=colors[j],label='Path '+str(j))
+                        ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
+    #                    self.axes[i].legend()
+    #                    self.axes[i].legend(loc='upper center',ncol=4,columnspacing=0.5,bbox_to_anchor=(0.5, 1.083),fancybox=True, shadow=True)
+                        ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i][j], 'o', markersize=1, color='gray')
+                        self.ln[i].append(ln)
+                        self.ln_med[i].append(ln_med)
+                        self.ln_blank[i].append(ln_blank)
+
+                if num_sensors==6:
+                    
+                    _path = [(0, 3), (0, 4), (0, 5), (1, 3), (1, 4), (1, 5),(2, 3),(2, 4),(2, 5)]
+#                   _path = [(1, 3), (1, 5), (1, 0), (4, 3), (4, 5), (4, 0),(2, 3),(2, 5),(2, 0)]
+                    colors = ['red', 'green', 'darkred', 'blue','magenta','yellow','lime','darkorange','navy']
+                    path_str=[]
+                    
+                    self.ln[i] = []
+                    self.ln_med[i] = []
+                    self.ln_blank[i] = []
+                    self.ydata[i] = [[] for _ in range(self.main_grap_line)]
+                    self.ydata_med[i] = [[] for _ in range(self.main_grap_line)]
+                    self.ydata_blank[i] = [[] for _ in range(self.main_grap_line)]
+                    
+                    for j in range(self.main_grap_line):
+                        temp_path_str = 'Path '+str(_path[j][0]) + " to " + str(_path[j][1])
+                        path_str.append(temp_path_str)
+                        
+                    legend_elements=[Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[0], markersize=10, label=path_str[0]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[1], markersize=10, label=path_str[1]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[2], markersize=10, label=path_str[2]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[3], markersize=10, label=path_str[3]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[4], markersize=10, label=path_str[4]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[5], markersize=10, label=path_str[5]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[6], markersize=10, label=path_str[6]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[7], markersize=10, label=path_str[7]),
+                                         Line2D([0], [0], marker='o', color='w', markerfacecolor=colors[8], markersize=10, label=path_str[8])]
+                    self.axes[i].legend(handles=legend_elements, loc='upper center', ncol=9, columnspacing=2, bbox_to_anchor=(0.5, 1.083), fancybox=True, shadow=True)
+                        
+                    for j in range(self.main_grap_line):
+                        
+                        ln, = self.axes[i].plot(self.xdata[i], self.ydata[i][j], 'o', markersize=0.5, color='gray')
+                        ln_med, = self.axes[i].plot(self.xdata_med[i], self.ydata_med[i][j], 'o', markersize=1, color=colors[j])
+                        ln_blank, = self.axes[i].plot(self.xdata_blank[i], self.ydata_blank[i][j], 'o', markersize=1, color='gray')
+                        self.ln[i].append(ln)
+                        self.ln_med[i].append(ln_med)
+                        self.ln_blank[i].append(ln_blank)                    
+                        
+                        
+                        
+                    
+                    
 
         self.axes[0].set_xlim(0, 60)
         self.axes[0].set_ylim(-1, 3)
@@ -400,34 +703,44 @@ class StripGraphs(FigureCanvas):
             fig=self.fig, func=self.up, interval=10)
 
     def update_median(self, median_window_size):
-        for graph in range(self.num_graphs):
+        for graph in range(self.num_graphs-1):
             self.xdata_med[graph], self.ydata_med[graph] = self.anem_processor_owner.update_medians(median_window_size,
                                                                                                     "strip", graph)
+            
+        self.xdata_med[2], self.ydata_med[2] = self.anem_processor_owner.update_medians(median_window_size,"strip", 2)
+        self.xdata_med[2], self.ydata_med_azimuth_world = self.anem_processor_owner.update_medians(median_window_size,"strip", 2)            
 
     def up(self, f):
+        if num_sensors == 4:
+            self.main_grap_line=4
+        if num_sensors == 6:
+            self.main_grap_line=9
         for g in range(self.num_graphs):
             # Take in input from buffer
             x = 0
             buf_len = len(self.anem_processor_owner.strip_graph_buffer[g])
             med_buf_len = len(self.anem_processor_owner.strip_graph_buffer_med[g])
             blank_buf_len = len(self.anem_processor_owner.strip_graph_buffer_blank[g])
+       
             for i in range(buf_len):
                 (x, y) = self.anem_processor_owner.strip_graph_buffer[g][i]
                 self.xdata[g].append(x)
                 if self.is_duct:
-                    for j in range(4):
+                    for j in range(self.main_grap_line):
                         self.ydata[g][j].append(y[j])
-                elif self.include_radial and g == self.num_graphs - 1:
+                elif self.include_radial and g == self.num_graphs - 1:           
                     (radial_anem, radial_world) = y
                     self.ydata[g].append(radial_anem)
                     self.ydata_azimuth_world.append(radial_world)
                 else:
+
                     self.ydata[g].append(y)
+                    
             for i in range(med_buf_len):
                 (x_med, y_med) = self.anem_processor_owner.strip_graph_buffer_med[g][i]
                 self.xdata_med[g].append(x_med)
                 if self.is_duct:
-                    for j in range(4):
+                    for j in range(self.main_grap_line):
                         self.ydata_med[g][j].append(y_med[j])
                 elif self.include_radial and g == self.num_graphs - 1:
                     (radial_anem_med, radial_world_med) = y_med
@@ -447,7 +760,7 @@ class StripGraphs(FigureCanvas):
                 (x, y) = self.anem_processor_owner.strip_graph_buffer_blank[g][i]
                 self.xdata_blank[g].append(x)
                 if self.is_duct:
-                    for j in range(4):
+                    for j in range(self.main_grap_line):
                         self.ydata_blank[g][j].append(y[j])
                 else:
                     self.ydata_blank[g].append(y)
@@ -464,7 +777,7 @@ class StripGraphs(FigureCanvas):
                     if self.is_duct:
                         val = self.ymax[g]
                         index = 0
-                        for i in range(4):
+                        for i in range(self.main_grap_line):
                             v, ind = find_min_max_index(self.ydata_med[g][i], self.ymin_index[g][1] + 1, True)
                             if v < val:
                                 val = v
@@ -477,7 +790,7 @@ class StripGraphs(FigureCanvas):
                     if self.is_duct:
                         val = self.ymin[g]
                         index = 0
-                        for i in range(4):
+                        for i in range(self.main_grap_line):
                             v, ind = find_min_max_index(self.ydata_med[g][i], self.ymax_index[g][1] + 1, False)
                             if v > val:
                                 val = v
@@ -500,7 +813,7 @@ class StripGraphs(FigureCanvas):
 
             # Set data for lines
             if self.is_duct:
-                for i in range(4):
+                for i in range(self.main_grap_line):
                     self.ln[g][i].set_data(self.xdata[g], self.ydata[g][i])
                     self.ln_med[g][i].set_data(self.xdata_med[g], self.ydata_med[g][i])
                     self.ln_blank[g][i].set_data(self.xdata_blank[g], self.ydata_blank[g][i])
@@ -558,6 +871,7 @@ class ToggleableGraph(FigureCanvas):
                                    QtWidgets.QSizePolicy.Expanding)
         FigureCanvas.updateGeometry(self)
         self.animation = self.animate()
+        
 
     def data_label(self):
         return str(self.paths[self.inbuf_index][0]) + " to " + str(self.paths[self.inbuf_index][1])
@@ -875,7 +1189,10 @@ def strformat_double(num):
 def find_min_max_index(data, start_index, find_min):
     search_data = data[start_index:]
     if find_min:
-        val = min(search_data)
+        try:
+            val = min(search_data)
+        except Exception:
+            val =0
     else:
         val = max(search_data)
     index = search_data.index(val) + start_index
